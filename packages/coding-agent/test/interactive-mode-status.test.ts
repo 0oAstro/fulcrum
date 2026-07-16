@@ -90,6 +90,7 @@ function createConnectionState(overrides: Partial<AgentConnectionState> = {}): A
 		availableThinkingLevels: ["minimal", "low", "medium", "high", "xhigh"],
 		isStreaming: false,
 		isCompacting: false,
+		isRefining: false,
 		isBashRunning: false,
 		retryAttempt: 0,
 		steeringMode: "all",
@@ -107,6 +108,30 @@ function createConnectionState(overrides: Partial<AgentConnectionState> = {}): A
 		...overrides,
 	};
 }
+
+test("tracks refinement lifecycle for the working indicator", () => {
+	const syncWorkingLoader = vi.fn();
+	const fakeThis = {
+		connectionState: createConnectionState(),
+		updateWorkingPulse: vi.fn(),
+		syncWorkingLoader,
+		activityTracker: new AgentActivityTracker(),
+		workingStartedAt: Date.now(),
+		workingMessage: undefined,
+	} as unknown as InteractiveMode;
+	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+	const prototype = InteractiveMode.prototype as unknown as {
+		updateConnectionStateFromEvent(this: InteractiveMode, event: AgentConnectionSessionEvent): void;
+		getWorkingLoaderMessage(this: InteractiveMode): string;
+	};
+
+	prototype.updateConnectionStateFromEvent.call(fakeThis, { type: "refinement_start" });
+	expect((fakeThis as unknown as { connectionState: AgentConnectionState }).connectionState.isRefining).toBe(true);
+	expect(prototype.getWorkingLoaderMessage.call(fakeThis)).toContain("Refining");
+
+	prototype.updateConnectionStateFromEvent.call(fakeThis, { type: "refinement_end" });
+	expect((fakeThis as unknown as { connectionState: AgentConnectionState }).connectionState.isRefining).toBe(false);
+});
 
 describe("mergeChildAgentSnapshots", () => {
 	const rich: AgentConnectionRlmChildAgentSnapshot = {

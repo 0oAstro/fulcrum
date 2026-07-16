@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Added `@` file-path autocomplete to new-agent and reply prompts in the Agents View.
+- Added visible refinement status and queued user prompts until refinement finishes.
 
 ## [0.3.1] - 2026-07-15
 

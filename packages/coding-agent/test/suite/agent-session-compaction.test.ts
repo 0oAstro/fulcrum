@@ -114,20 +114,20 @@ describe("AgentSession compaction characterization", () => {
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-			_cancelPostCompactionContinue(): void;
-			_postCompactionContinuationScheduled: boolean;
+			_scheduleQueuedContinue(): void;
+			_cancelQueuedContinue(): void;
+			_queuedContinueScheduled: boolean;
 		};
 		try {
 			await harness.session.prompt("one");
 			await harness.session.prompt("two");
-			internals._schedulePostCompactionContinue();
+			internals._scheduleQueuedContinue();
 
 			await harness.session.compact();
 
-			expect(internals._postCompactionContinuationScheduled).toBe(true);
+			expect(internals._queuedContinueScheduled).toBe(true);
 		} finally {
-			internals._cancelPostCompactionContinue();
+			internals._cancelQueuedContinue();
 		}
 	});
 
@@ -580,7 +580,7 @@ describe("AgentSession compaction characterization", () => {
 		});
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
+			_scheduleQueuedContinue(): void;
 			_postCompactionContinuationMessages: AgentMessage[];
 		};
 		const steeringMessage = {
@@ -600,7 +600,7 @@ describe("AgentSession compaction characterization", () => {
 		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 		const followUpSpy = vi.spyOn(harness.session.agent, "followUp");
 
-		sessionInternals._schedulePostCompactionContinue();
+		sessionInternals._scheduleQueuedContinue();
 		await vi.advanceTimersByTimeAsync(100);
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
@@ -622,9 +622,9 @@ describe("AgentSession compaction characterization", () => {
 		});
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
+			_scheduleQueuedContinue(): void;
 			_postCompactionContinuationMessages: AgentMessage[];
-			_postCompactionContinuationScheduled: boolean;
+			_queuedContinueScheduled: boolean;
 		};
 		const queuedMessage = {
 			role: "user",
@@ -639,12 +639,12 @@ describe("AgentSession compaction characterization", () => {
 			.spyOn(harness.session.agent, "continue")
 			.mockRejectedValueOnce(new Error("already processing"));
 
-		sessionInternals._schedulePostCompactionContinue();
+		sessionInternals._scheduleQueuedContinue();
 		await vi.advanceTimersByTimeAsync(100);
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 		expect(sessionInternals._postCompactionContinuationMessages).toEqual([queuedMessage]);
-		expect(sessionInternals._postCompactionContinuationScheduled).toBe(true);
+		expect(sessionInternals._queuedContinueScheduled).toBe(true);
 	});
 
 	it("clears queued autonomous threshold continuations when autonomous mode is disabled", async () => {

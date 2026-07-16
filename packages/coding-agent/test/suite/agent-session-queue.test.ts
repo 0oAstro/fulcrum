@@ -25,14 +25,14 @@ type AutoRefineInternals = {
 	_scheduleAutoRefine(reason: AutoRefineReason): void;
 	_scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void;
 	_scheduleAutoRefineAfterAgentEnd(): void;
-	_schedulePostCompactionContinue(): void;
+	_scheduleQueuedContinue(): void;
 	_invalidatePendingAutoRefineForBranchChange(): Promise<void>;
-	_cancelPostCompactionContinue(): void;
+	_cancelQueuedContinue(): void;
 	_assistantTurnsSinceAutoRefine: number;
 	_lastAutoRefineReviewAt: number;
 	_compactAutoRefinePending: boolean;
 	_turnIntervalAutoRefinePending: boolean;
-	_postCompactionContinuationScheduled: boolean;
+	_queuedContinueScheduled: boolean;
 	_pendingAutoRefineReview?: unknown;
 	_autoRefineInProgress: boolean;
 	_autoRefineBranchVersion: number;
@@ -245,13 +245,13 @@ describe("AgentSession queue characterization", () => {
 		const internals = harness.session as unknown as AutoRefineInternals;
 		const scheduleAutoRefine = vi.spyOn(internals, "_scheduleAutoRefine").mockImplementation(() => {});
 		internals._compactAutoRefinePending = true;
-		internals._postCompactionContinuationScheduled = true;
+		internals._queuedContinueScheduled = true;
 
 		internals._scheduleAutoRefineAfterAgentEnd();
 
 		expect(scheduleAutoRefine).not.toHaveBeenCalled();
 
-		internals._postCompactionContinuationScheduled = false;
+		internals._queuedContinueScheduled = false;
 		internals._scheduleAutoRefineAfterAgentEnd();
 
 		expect(scheduleAutoRefine).toHaveBeenCalledWith("compact");
@@ -324,16 +324,16 @@ describe("AgentSession queue characterization", () => {
 			.mockResolvedValueOnce();
 
 		try {
-			internals._schedulePostCompactionContinue();
+			internals._scheduleQueuedContinue();
 			await vi.advanceTimersByTimeAsync(100);
 
 			expect(continueAgent).toHaveBeenCalledTimes(1);
-			expect(internals._postCompactionContinuationScheduled).toBe(true);
+			expect(internals._queuedContinueScheduled).toBe(true);
 
 			await vi.advanceTimersByTimeAsync(100);
 
 			expect(continueAgent).toHaveBeenCalledTimes(2);
-			expect(internals._postCompactionContinuationScheduled).toBe(false);
+			expect(internals._queuedContinueScheduled).toBe(false);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -349,12 +349,12 @@ describe("AgentSession queue characterization", () => {
 		const continueAgent = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 
 		try {
-			internals._schedulePostCompactionContinue();
+			internals._scheduleQueuedContinue();
 			await internals._invalidatePendingAutoRefineForBranchChange();
 			await vi.advanceTimersByTimeAsync(100);
 
 			expect(continueAgent).not.toHaveBeenCalled();
-			expect(internals._postCompactionContinuationScheduled).toBe(false);
+			expect(internals._queuedContinueScheduled).toBe(false);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -368,13 +368,13 @@ describe("AgentSession queue characterization", () => {
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
 		try {
-			internals._schedulePostCompactionContinue();
+			internals._scheduleQueuedContinue();
 
 			await expect(harness.session.compact()).rejects.toThrow("Session is too short to compact");
 
-			expect(internals._postCompactionContinuationScheduled).toBe(true);
+			expect(internals._queuedContinueScheduled).toBe(true);
 		} finally {
-			internals._cancelPostCompactionContinue();
+			internals._cancelQueuedContinue();
 			vi.useRealTimers();
 		}
 	});
@@ -1164,7 +1164,7 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
-	it("persists a prompt started while a background refine is in flight", async () => {
+	it("queues and resumes a prompt submitted during refinement", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
 		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
@@ -1192,30 +1192,81 @@ describe("AgentSession queue characterization", () => {
 					);
 				},
 				fauxAssistantMessage("prompt reply"),
+				fauxAssistantMessage("second reply"),
 			]);
+			let secondPrompt: Promise<void> | undefined;
+			const refinementStates: Array<[string, boolean]> = [];
+			harness.session.subscribe((event) => {
+				if (event.type === "refinement_start" || event.type === "refinement_end") {
+					refinementStates.push([event.type, harness.session.isRefining]);
+				}
+				if (event.type === "refinement_end") {
+					secondPrompt = harness.session.prompt("second prompt");
+				}
+			});
 
 			const refinePromise = harness.session.refine({ instructions: "background refine" });
 			await planStartedPromise;
+			await harness.session.prompt("hello during refine");
 
-			const promptPromise = harness.session.prompt("hello during refine");
-			await new Promise((resolve) => setTimeout(resolve, 10));
-			// The prompt must wait for the refine (its response is still queued);
-			// running now would drop its events while the session is detached.
-			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(harness.session.getSteeringMessages()).toEqual([]);
+			expect(harness.session.getFollowUpMessages()).toEqual(["hello during refine"]);
+			expect(harness.getPendingResponseCount()).toBe(2);
 
 			releasePlan?.();
 			await refinePromise;
-			await promptPromise;
+			await secondPrompt;
+			await vi.waitFor(() => {
+				expect(getAssistantTexts(harness)).toContain("prompt reply");
+			});
 
-			expect(
-				harness
-					.eventsOfType("message_end")
-					.some((event) => event.message.role === "assistant" && getMessageText(event.message) === "prompt reply"),
-			).toBe(true);
+			expect(refinementStates).toEqual([
+				["refinement_start", true],
+				["refinement_end", false],
+			]);
+			expect(getUserTexts(harness)).toEqual(["hello during refine", "second prompt"]);
+			expect(harness.session.pendingMessageCount).toBe(0);
 			const persistedAssistants = harness.sessionManager
 				.getEntries()
 				.filter((entry) => entry.type === "message" && entry.message.role === "assistant");
-			expect(persistedAssistants).toHaveLength(1);
+			expect(persistedAssistants).toHaveLength(2);
+		} finally {
+			if (previousAgentDir === undefined) {
+				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			} else {
+				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+			}
+		}
+	});
+
+	it("resumes queued prompts after refinement failure", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		try {
+			let releasePlan: (() => void) | undefined;
+			const planGate = new Promise<void>((resolve) => {
+				releasePlan = resolve;
+			});
+			harness.setResponses([
+				async () => {
+					await planGate;
+					throw new Error("refinement failed");
+				},
+				fauxAssistantMessage("queued reply"),
+			]);
+
+			const refinePromise = harness.session.refine({ instructions: "fail this refinement" });
+			await vi.waitFor(() => expect(harness.session.isRefining).toBe(true));
+			await harness.session.prompt("preserve this prompt");
+			releasePlan?.();
+
+			await expect(refinePromise).rejects.toThrow();
+			await vi.waitFor(() => {
+				expect(getAssistantTexts(harness)).toContain("queued reply");
+			});
+			expect(harness.session.pendingMessageCount).toBe(0);
 		} finally {
 			if (previousAgentDir === undefined) {
 				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;

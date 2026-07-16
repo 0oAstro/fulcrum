@@ -158,6 +158,7 @@ export function isSessionBusy(summary: SessionSummary): boolean {
 	return (
 		summary.isStreaming ||
 		summary.isCompacting ||
+		summary.isRefining === true ||
 		summary.isBashRunning === true ||
 		summary.hasRunningRlmChildren === true ||
 		summary.pendingMessageCount > 0

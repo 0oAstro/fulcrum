@@ -379,6 +379,9 @@ function getSessionSubtitle(summary: SessionSummary): string {
 }
 
 function getSessionStatusLabel(summary: SessionSummary): string {
+	if (summary.isRefining) {
+		return "refining";
+	}
 	if (summary.isCompacting) {
 		return "compacting";
 	}

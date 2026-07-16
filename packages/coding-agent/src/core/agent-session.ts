@@ -269,6 +269,8 @@ export type AgentSessionEvent =
 			followUp: readonly string[];
 	  }
 	| { type: "compaction_start"; reason: CompactionReason; customInstructions?: string }
+	| { type: "refinement_start" }
+	| { type: "refinement_end" }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "service_tier_changed"; serviceTier: ServiceTier }
@@ -893,8 +895,8 @@ export class AgentSession {
 	private _autoRefineInProgress = false;
 	private _compactAutoRefinePending = false;
 	private _turnIntervalAutoRefinePending = false;
-	private _postCompactionContinuationScheduled = false;
-	private _postCompactionContinuationTimer: ReturnType<typeof setTimeout> | undefined;
+	private _queuedContinueScheduled = false;
+	private _queuedContinueTimer: ReturnType<typeof setTimeout> | undefined;
 	private _postCompactionContinuationMessages: AgentMessage[] = [];
 	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
 	private _queuedAutonomousContinuationSnapshots = new WeakMap<AgentMessage, AutonomousRuntimeSnapshot>();
@@ -1689,7 +1691,7 @@ export class AgentSession {
 			this._continueAfterThresholdCompaction = false;
 		}
 		if (!this.agent.hasQueuedMessages()) {
-			this._cancelPostCompactionContinue();
+			this._cancelQueuedContinue();
 		}
 	}
 
@@ -2558,7 +2560,7 @@ export class AgentSession {
 			// resolution cannot write harness state or re-subscribe handlers.
 			this._autoRefineReviewAbort?.abort();
 			this._refineAbortController?.abort();
-			this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+			this._discardPendingAutoRefine({ cancelQueuedContinue: true });
 			this._autoRefineBranchVersion++;
 			this._cancelActiveRlmChildRuns("Parent session disposed");
 			for (const unsubscribe of this._retainedRlmChildUnsubscribes.values()) {
@@ -2697,6 +2699,11 @@ export class AgentSession {
 			this._compactionAbortController !== undefined ||
 			this._branchSummaryAbortController !== undefined
 		);
+	}
+
+	/** Whether continual harness refinement is currently running. */
+	get isRefining(): boolean {
+		return this._refineInFlight !== undefined;
 	}
 
 	/** All messages including custom types like BashExecutionMessage */
@@ -3155,8 +3162,20 @@ export class AgentSession {
 			// enqueue according to the requested behavior.
 			const shouldQueueForStreaming = this.isStreaming;
 			const shouldQueueForPendingWork = hasQueueIfBusyBackpressure();
-			if (shouldQueueForStreaming || shouldQueueForPendingWork) {
-				if (!options?.streamingBehavior) {
+			const shouldQueueUserPromptBehindExistingMessages =
+				options?.agentMessageId === undefined && this._queuedContinueScheduled && this.pendingMessageCount > 0;
+			const shouldQueueForRefinement = this.isRefining;
+			if (
+				shouldQueueForStreaming ||
+				shouldQueueForPendingWork ||
+				shouldQueueUserPromptBehindExistingMessages ||
+				shouldQueueForRefinement
+			) {
+				const streamingBehavior =
+					shouldQueueForRefinement || shouldQueueUserPromptBehindExistingMessages
+						? "followUp"
+						: options?.streamingBehavior;
+				if (!streamingBehavior) {
 					const stateDescription = shouldQueueForStreaming
 						? "Agent is already processing"
 						: "Agent has queued work";
@@ -3167,12 +3186,12 @@ export class AgentSession {
 				const queued = await this._queuePromptWithPendingNextTurnMessages(
 					expandedText,
 					currentImages,
-					options.streamingBehavior,
+					streamingBehavior,
 					{
-						queueKey: options.followUpQueueKey,
-						agentMessageId: options.agentMessageId,
-						suppressAutonomousContinuation: options.suppressAutonomousContinuation,
-						customMessage: options.customMessage,
+						queueKey: options?.followUpQueueKey,
+						agentMessageId: options?.agentMessageId,
+						suppressAutonomousContinuation: options?.suppressAutonomousContinuation,
+						customMessage: options?.customMessage,
 					},
 				);
 				if (!queued) {
@@ -3332,18 +3351,21 @@ export class AgentSession {
 			reportPreflight(false);
 			throw new Error("Accepted agent message was cleared before delivery.");
 		}
+		const refiningAtHandoff = this.isRefining;
 		const shouldQueueAtHandoff =
-			options?.queueIfBusy === true &&
-			(this.isStreaming ||
-				this.pendingMessageCount > 0 ||
-				this.isCompacting ||
-				this.isRetrying ||
-				this.isBashRunning ||
-				this._acceptedPromptCompletions.size > 0 ||
-				(this._acceptedAgentMessagePrompt !== undefined &&
-					this._acceptedAgentMessagePrompt !== acceptedAgentMessagePrompt));
+			refiningAtHandoff ||
+			(options?.queueIfBusy === true &&
+				(this.isStreaming ||
+					this.pendingMessageCount > 0 ||
+					this.isCompacting ||
+					this.isRetrying ||
+					this.isBashRunning ||
+					this._acceptedPromptCompletions.size > 0 ||
+					(this._acceptedAgentMessagePrompt !== undefined &&
+						this._acceptedAgentMessagePrompt !== acceptedAgentMessagePrompt)));
 		if (shouldQueueAtHandoff) {
-			if (!options?.streamingBehavior) {
+			const streamingBehavior = refiningAtHandoff ? "followUp" : options?.streamingBehavior;
+			if (!streamingBehavior) {
 				if (acceptedAgentMessagePrompt && this._acceptedAgentMessagePrompt === acceptedAgentMessagePrompt) {
 					this._acceptedAgentMessagePrompt = undefined;
 				}
@@ -3360,12 +3382,12 @@ export class AgentSession {
 			const queued = await this._queuePromptWithPendingNextTurnMessages(
 				expandedText,
 				currentImages,
-				options.streamingBehavior,
+				streamingBehavior,
 				{
-					queueKey: options.followUpQueueKey,
-					agentMessageId: options.agentMessageId,
-					suppressAutonomousContinuation: options.suppressAutonomousContinuation,
-					customMessage: options.customMessage,
+					queueKey: options?.followUpQueueKey,
+					agentMessageId: options?.agentMessageId,
+					suppressAutonomousContinuation: options?.suppressAutonomousContinuation,
+					customMessage: options?.customMessage,
 				},
 			);
 			if (!queued) {
@@ -4499,7 +4521,7 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
-		const hadPostCompactionContinue = this._postCompactionContinuationScheduled;
+		const hadQueuedContinue = this._queuedContinueScheduled;
 		this._disconnectFromAgent();
 		await this.abort();
 		let didCompact = false;
@@ -4561,9 +4583,9 @@ export class AgentSession {
 			}
 			resolveCompactionOperation();
 			if (didCompact) {
-				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
-				if (hadPostCompactionContinue) {
-					this._schedulePostCompactionContinue();
+				this._discardPendingAutoRefine({ cancelQueuedContinue: true });
+				if (hadQueuedContinue) {
+					this._scheduleQueuedContinue();
 				}
 				this._scheduleAutoRefine("compact");
 			}
@@ -4672,26 +4694,26 @@ export class AgentSession {
 		return this._rlmDepth === 0 && this._localHarnessStateDir() !== undefined;
 	}
 
-	private _cancelPostCompactionContinue(): void {
-		if (this._postCompactionContinuationTimer) {
-			clearTimeout(this._postCompactionContinuationTimer);
-			this._postCompactionContinuationTimer = undefined;
+	private _cancelQueuedContinue(): void {
+		if (this._queuedContinueTimer) {
+			clearTimeout(this._queuedContinueTimer);
+			this._queuedContinueTimer = undefined;
 		}
-		this._postCompactionContinuationScheduled = false;
+		this._queuedContinueScheduled = false;
 	}
 
-	private _discardPendingAutoRefine(options: { cancelPostCompactionContinue?: boolean } = {}): void {
+	private _discardPendingAutoRefine(options: { cancelQueuedContinue?: boolean } = {}): void {
 		this._compactAutoRefinePending = false;
 		this._turnIntervalAutoRefinePending = false;
 		this._pendingAutoRefineReview = undefined;
-		if (options.cancelPostCompactionContinue) {
-			this._cancelPostCompactionContinue();
+		if (options.cancelQueuedContinue) {
+			this._cancelQueuedContinue();
 		}
 	}
 
 	private async _invalidatePendingAutoRefineForBranchChange(): Promise<void> {
 		this._autoRefineReviewAbort?.abort();
-		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+		this._discardPendingAutoRefine({ cancelQueuedContinue: true });
 		this._assistantTurnsSinceAutoRefine = 0;
 		this._autoRefineBranchVersion++;
 		await this._waitForRefineIdle();
@@ -4706,7 +4728,7 @@ export class AgentSession {
 			return;
 		}
 		if (this._compactAutoRefinePending) {
-			if (this._postCompactionContinuationScheduled) {
+			if (this._queuedContinueScheduled) {
 				return;
 			}
 			this._scheduleAutoRefine("compact");
@@ -4728,29 +4750,35 @@ export class AgentSession {
 		this._scheduleAutoRefine("compact");
 	}
 
-	private _schedulePostCompactionContinue(): void {
-		if (this._postCompactionContinuationScheduled) {
+	private _scheduleQueuedContinue(): void {
+		if (this._queuedContinueScheduled) {
 			return;
 		}
-		this._postCompactionContinuationScheduled = true;
-		this._postCompactionContinuationTimer = setTimeout(() => {
-			this._postCompactionContinuationTimer = undefined;
-			void this._runScheduledPostCompactionContinue();
+		this._queuedContinueScheduled = true;
+		this._queuedContinueTimer = setTimeout(() => {
+			this._queuedContinueTimer = undefined;
+			void this._runScheduledQueuedContinue();
 		}, 100);
 	}
 
-	private async _runScheduledPostCompactionContinue(): Promise<void> {
+	private async _runScheduledQueuedContinue(): Promise<void> {
 		await this._waitForRefineIdle();
-		if (!this._postCompactionContinuationScheduled) {
+		if (!this._queuedContinueScheduled) {
 			return;
 		}
-		if (this.isStreaming || this.isCompacting) {
-			this._postCompactionContinuationScheduled = false;
-			this._schedulePostCompactionContinue();
+		if (
+			this.isStreaming ||
+			this.isCompacting ||
+			this.isRetrying ||
+			this.isBashRunning ||
+			this.hasAcceptedPromptInFlight
+		) {
+			this._queuedContinueScheduled = false;
+			this._scheduleQueuedContinue();
 			return;
 		}
 
-		this._postCompactionContinuationScheduled = false;
+		this._queuedContinueScheduled = false;
 		const continuationMessages = [...this._postCompactionContinuationMessages];
 		try {
 			await this.agent.continue();
@@ -4758,7 +4786,7 @@ export class AgentSession {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			if (message.includes("already processing")) {
-				this._schedulePostCompactionContinue();
+				this._scheduleQueuedContinue();
 			}
 		}
 	}
@@ -4997,11 +5025,16 @@ export class AgentSession {
 			() => undefined,
 		);
 		this._refineInFlight = settled;
+		this._emit({ type: "refinement_start" });
 		try {
 			return await run;
 		} finally {
 			if (this._refineInFlight === settled) {
 				this._refineInFlight = undefined;
+				if (this.agent.hasQueuedMessages()) {
+					this._scheduleQueuedContinue();
+				}
+				this._emit({ type: "refinement_end" });
 			}
 		}
 	}
@@ -5275,7 +5308,7 @@ export class AgentSession {
 		// A requested compaction stopped the loop on purpose; don't stall if it fails.
 		const resumeAfterFailure = () => {
 			if (reason === "requested" && (shouldContinueAfterCompaction || this.agent.hasQueuedMessages())) {
-				this._schedulePostCompactionContinue();
+				this._scheduleQueuedContinue();
 			}
 		};
 
@@ -5335,13 +5368,13 @@ export class AgentSession {
 					this.agent.state.messages = messages.slice(0, -1);
 				}
 
-				this._schedulePostCompactionContinue();
+				this._scheduleQueuedContinue();
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
 				return true;
 			} else if (shouldContinueAfterCompaction || hasQueuedMessages) {
 				// Compaction can intentionally stop a tool loop between turns.
 				// Queued follow-up/steering/custom messages can also be waiting.
-				this._schedulePostCompactionContinue();
+				this._scheduleQueuedContinue();
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
 			} else {
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
@@ -6781,7 +6814,7 @@ export class AgentSession {
 		}
 		if (this._retryAttempt > 0) {
 			this._autoCompactionAbortController?.abort();
-			this._cancelPostCompactionContinue();
+			this._cancelQueuedContinue();
 			this._emit({
 				type: "auto_retry_end",
 				success: false,

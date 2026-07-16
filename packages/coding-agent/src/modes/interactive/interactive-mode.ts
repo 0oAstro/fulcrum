@@ -2219,6 +2219,7 @@ export class InteractiveMode {
 		this.sessionRecap = state.recap;
 		this.renderRecap();
 		this.updateWorkingPulse();
+		this.syncWorkingLoader();
 	}
 
 	private patchConnectionState(patch: Partial<AgentConnectionState>): void {
@@ -2282,6 +2283,12 @@ export class InteractiveMode {
 			case "compaction_end":
 				this.patchConnectionState({ isCompacting: false });
 				break;
+			case "refinement_start":
+				this.patchConnectionState({ isRefining: true });
+				break;
+			case "refinement_end":
+				this.patchConnectionState({ isRefining: false });
+				break;
 			case "session_info_changed":
 				this.patchConnectionState({ sessionName: event.name });
 				break;
@@ -2343,6 +2350,10 @@ export class InteractiveMode {
 
 	private isAgentCompacting(): boolean {
 		return this.connectionState?.isCompacting ?? false;
+	}
+
+	private isAgentRefining(): boolean {
+		return this.connectionState?.isRefining ?? false;
 	}
 
 	private isBashRunning(): boolean {
@@ -2720,6 +2731,9 @@ export class InteractiveMode {
 		const status = this.activityTracker.getStatus();
 		// The subagent count/recaps live in the tree above the loader, so the loader
 		// message itself no longer repeats "N subagents running".
+		if (this.isAgentRefining()) {
+			return elapsed === undefined ? "Refining" : `Refining · ${elapsed}`;
+		}
 		if (!this.isAgentStreaming()) {
 			return "";
 		}
@@ -2828,8 +2842,8 @@ export class InteractiveMode {
 	private shouldShowWorkingLoader(): boolean {
 		// Background subagents (agent turn done, asyncio tasks still running) would
 		// otherwise show a textless spinner; the subagent tree above the loader carries
-		// that state, so the loader only shows while the main agent is itself streaming.
-		return this.workingVisible && this.isAgentStreaming();
+		// that state, so the loader only shows while the main agent is streaming or refining.
+		return this.workingVisible && (this.isAgentStreaming() || this.isAgentRefining());
 	}
 
 	// Reconcile the loader with current state for transitions that fire no live
@@ -4633,6 +4647,18 @@ export class InteractiveMode {
 				await this.checkShutdownRequested();
 
 				this.ui.requestRender();
+				break;
+
+			case "refinement_start":
+				this.stopWorkingLoader();
+				if (this.workingVisible) {
+					this.startWorkingLoader();
+				}
+				this.ui.requestRender();
+				break;
+
+			case "refinement_end":
+				this.syncWorkingLoader();
 				break;
 
 			case "compaction_start": {

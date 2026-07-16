@@ -43,6 +43,11 @@ describe("agents view state", () => {
 		expect(classifyAgentsViewSession(makeSummary({ activity: "idle", messageCount: 4 }))).toBe("needs-input");
 	});
 
+	test("labels active refinement work", () => {
+		const [row] = buildAgentsViewRows([makeSummary({ isRefining: true, activity: "working" })]);
+		expect(row?.statusLabel).toBe("refining");
+	});
+
 	test("idle sessions split by the summarizer's completion verdict", () => {
 		// Working is heuristic and ignores taskState.
 		expect(

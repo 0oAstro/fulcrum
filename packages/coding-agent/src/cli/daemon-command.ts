@@ -1440,6 +1440,12 @@ class DaemonAttachTerminal {
 			case "compaction_end":
 				this.writeLine(chalk.dim(`Compaction ${event.aborted ? "aborted" : "finished"}: ${event.reason}`));
 				return;
+			case "refinement_start":
+				this.writeLine(chalk.dim("Refinement started."));
+				return;
+			case "refinement_end":
+				this.writeLine(chalk.dim("Refinement finished."));
+				return;
 			case "auto_retry_start":
 				this.writeLine(chalk.dim(`Retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`));
 				return;
@@ -1615,6 +1621,7 @@ function isSessionSummary(value: unknown): value is SessionSummary {
 		typeof candidate.activity === "string" &&
 		typeof candidate.isStreaming === "boolean" &&
 		typeof candidate.isCompacting === "boolean" &&
+		(candidate.isRefining === undefined || typeof candidate.isRefining === "boolean") &&
 		typeof candidate.attachedClients === "number" &&
 		typeof candidate.messageCount === "number" &&
 		typeof candidate.pendingMessageCount === "number"
