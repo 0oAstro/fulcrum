@@ -42,11 +42,11 @@ type SessionRetryCompactionInternals = {
 	_retryPromise: Promise<void> | undefined;
 	_retryResolve: (() => void) | undefined;
 	_autoCompactionAbortController: AbortController | undefined;
-	_postCompactionContinuationScheduled: boolean;
+	_queuedContinueScheduled: boolean;
 	_processAgentEvent: (event: AgentEvent) => Promise<void>;
 	_checkCompaction: (message: AssistantMessage) => Promise<boolean>;
-	_schedulePostCompactionContinue: () => void;
-	_cancelPostCompactionContinue: () => void;
+	_scheduleQueuedContinue: () => void;
+	_cancelQueuedContinue: () => void;
 };
 
 describe("AgentSession retry and event characterization", () => {
@@ -293,15 +293,15 @@ describe("AgentSession retry and event characterization", () => {
 			internals._retryResolve = resolve;
 		});
 		internals._autoCompactionAbortController = compactionAbortController;
-		internals._schedulePostCompactionContinue();
+		internals._scheduleQueuedContinue();
 
 		try {
-			expect(internals._postCompactionContinuationScheduled).toBe(true);
+			expect(internals._queuedContinueScheduled).toBe(true);
 
 			harness.session.abortRetry();
 
 			expect(compactionAbortController.signal.aborted).toBe(true);
-			expect(internals._postCompactionContinuationScheduled).toBe(false);
+			expect(internals._queuedContinueScheduled).toBe(false);
 			expect(internals._retryAttempt).toBe(0);
 			expect(harness.session.isRetrying).toBe(false);
 			expect(harness.eventsOfType("auto_retry_end").at(-1)).toMatchObject({
@@ -311,7 +311,7 @@ describe("AgentSession retry and event characterization", () => {
 			});
 		} finally {
 			internals._autoCompactionAbortController = undefined;
-			internals._cancelPostCompactionContinue();
+			internals._cancelQueuedContinue();
 		}
 	});
 

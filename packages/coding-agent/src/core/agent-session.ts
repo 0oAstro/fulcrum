@@ -3192,7 +3192,7 @@ export class AgentSession {
 			const shouldQueueForPendingWork = hasQueueIfBusyBackpressure();
 			const shouldQueueUserPromptBehindExistingMessages =
 				options?.agentMessageId === undefined && this._queuedContinueScheduled && this.pendingMessageCount > 0;
-			const shouldQueueForRefinement = this.isRefining;
+			const shouldQueueForRefinement = options?.agentMessageId === undefined && this.isRefining;
 			if (
 				shouldQueueForStreaming ||
 				shouldQueueForPendingWork ||
@@ -3379,7 +3379,7 @@ export class AgentSession {
 			reportPreflight(false);
 			throw new Error("Accepted agent message was cleared before delivery.");
 		}
-		const refiningAtHandoff = this.isRefining;
+		const refiningAtHandoff = options?.agentMessageId === undefined && this.isRefining;
 		const shouldQueueAtHandoff =
 			refiningAtHandoff ||
 			(options?.queueIfBusy === true &&
