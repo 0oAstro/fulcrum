@@ -1239,6 +1239,50 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
+	it("queues a handoff prompt behind refinement follow-ups already scheduled to resume", async () => {
+		let releasePreflight: (() => void) | undefined;
+		const preflightGate = new Promise<void>((resolve) => {
+			releasePreflight = resolve;
+		});
+		let preflightStarted: (() => void) | undefined;
+		const preflightStartedPromise = new Promise<void>((resolve) => {
+			preflightStarted = resolve;
+		});
+		const harness = await createAutoRefineHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async () => {
+						preflightStarted?.();
+						await preflightGate;
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		let releaseRefine: (() => void) | undefined;
+		const refineGate = new Promise<void>((resolve) => {
+			releaseRefine = resolve;
+		});
+		const internals = harness.session as unknown as {
+			_refineInFlight?: Promise<void>;
+		};
+		harness.setResponses([fauxAssistantMessage("first reply"), fauxAssistantMessage("second reply")]);
+
+		const latePrompt = harness.session.prompt("late handoff prompt");
+		await preflightStartedPromise;
+		internals._refineInFlight = refineGate;
+		await harness.session.followUp("already queued", undefined, { resumeIfIdle: true });
+		releasePreflight?.();
+		await Promise.resolve();
+		internals._refineInFlight = undefined;
+		releaseRefine?.();
+
+		await latePrompt;
+		await vi.waitFor(() => expect(harness.session.pendingMessageCount).toBe(0));
+		expect(getUserTexts(harness)).toEqual(["already queued", "late handoff prompt"]);
+		expect(getAssistantTexts(harness)).toEqual(["first reply", "second reply"]);
+	});
+
 	it("resumes queued prompts after refinement failure", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);

@@ -3407,8 +3407,11 @@ export class AgentSession {
 			throw new Error("Accepted agent message was cleared before delivery.");
 		}
 		const refiningAtHandoff = options?.agentMessageId === undefined && this.isRefining;
+		const shouldQueueUserPromptBehindExistingMessagesAtHandoff =
+			options?.agentMessageId === undefined && this._pendingMessageResumeRequested && this.pendingMessageCount > 0;
 		const shouldQueueAtHandoff =
 			refiningAtHandoff ||
+			shouldQueueUserPromptBehindExistingMessagesAtHandoff ||
 			(options?.queueIfBusy === true &&
 				(this.isStreaming ||
 					this.pendingMessageCount > 0 ||
@@ -3419,7 +3422,10 @@ export class AgentSession {
 					(this._acceptedAgentMessagePrompt !== undefined &&
 						this._acceptedAgentMessagePrompt !== acceptedAgentMessagePrompt)));
 		if (shouldQueueAtHandoff) {
-			const streamingBehavior = refiningAtHandoff ? "followUp" : options?.streamingBehavior;
+			const streamingBehavior =
+				refiningAtHandoff || shouldQueueUserPromptBehindExistingMessagesAtHandoff
+					? "followUp"
+					: options?.streamingBehavior;
 			if (!streamingBehavior) {
 				if (acceptedAgentMessagePrompt && this._acceptedAgentMessagePrompt === acceptedAgentMessagePrompt) {
 					this._acceptedAgentMessagePrompt = undefined;
@@ -3443,7 +3449,8 @@ export class AgentSession {
 					agentMessageId: options?.agentMessageId,
 					suppressAutonomousContinuation: options?.suppressAutonomousContinuation,
 					customMessage: options?.customMessage,
-					resumeIfIdle: options?.resumeIfIdle || refiningAtHandoff,
+					resumeIfIdle:
+						options?.resumeIfIdle || refiningAtHandoff || shouldQueueUserPromptBehindExistingMessagesAtHandoff,
 				},
 			);
 			if (!queued) {
