@@ -207,6 +207,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"steer",
 	"follow_up",
 	"restore_next_turn",
+	"append_custom_message",
 	"resume_queue",
 	"send_message",
 	"agent_messages_status",
@@ -1199,7 +1200,7 @@ export class AgentDaemon {
 			if (!this.isCronJobRunnableForState(runnableJob, state, requirePersistedJob)) {
 				return "skipped";
 			}
-			await session.followUp(runnableJob.prompt);
+			await session.followUp(runnableJob.prompt, undefined, { resumeIfIdle: true });
 			return;
 		}
 		const getRunnableJob = (): AgentCronJob | undefined => {
@@ -2287,6 +2288,7 @@ export class AgentDaemon {
 		socket.on("close", cleanup);
 		socket.on("error", cleanup);
 		socket.on("drain", () => {
+			client.backpressured = false;
 			if (!client.snapshotStreaming) {
 				void this.catchUpBackpressuredClient(client).catch((error) =>
 					this.log(`could not catch up snapshot client ${client.id}: ${String(error)}`),
@@ -2812,6 +2814,7 @@ export class AgentDaemon {
 					await state.runtime.session.steer(command.message, command.images, {
 						queueKey: command.queueKey,
 						agentMessageId: command.agentMessageId,
+						resumeIfIdle: true,
 					});
 				}
 				this.recordWorkerRecoveryState(state, "steer_queued", true);
@@ -2833,6 +2836,7 @@ export class AgentDaemon {
 					queued = await state.runtime.session.followUp(command.message, command.images, {
 						queueKey: command.queueKey,
 						agentMessageId: command.agentMessageId,
+						resumeIfIdle: true,
 					});
 				}
 				if (queued) {
@@ -2845,6 +2849,12 @@ export class AgentDaemon {
 				const state = this.getSessionState(command.activeSessionId);
 				state.runtime.session.restorePendingNextTurnMessages(command.messages);
 				return success(command.id, "restore_next_turn");
+			}
+
+			case "append_custom_message": {
+				const state = this.getSessionState(command.activeSessionId);
+				await state.runtime.session.sendCustomMessage(command.message);
+				return success(command.id, "append_custom_message");
 			}
 
 			case "resume_queue": {
@@ -4177,7 +4187,7 @@ export class AgentDaemon {
 	}
 
 	private writeUpdateRestartManifest(manifest: DaemonUpdateRestartManifest): void {
-		const path = getDaemonUpdateRestartManifestPath(this.agentDir);
+		const path = getDaemonUpdateRestartManifestPath(this.socketPath, this.agentDir);
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, `${JSON.stringify(manifest)}\n`);
 	}
@@ -4597,11 +4607,37 @@ export class AgentDaemon {
 		}
 	}
 
-	private async catchUpBackpressuredClient(client: DaemonSocketClient): Promise<void> {
+	private catchUpBackpressuredClient(client: DaemonSocketClient): Promise<void> {
+		if (client.catchupPromise) {
+			return client.catchupPromise;
+		}
+		if (client.snapshotStreaming || client.backpressured) {
+			return Promise.resolve();
+		}
+		const catchup = this.drainBackpressuredClientCatchupQueue(client).finally(() => {
+			if (client.catchupPromise === catchup) {
+				client.catchupPromise = undefined;
+			}
+		});
+		client.catchupPromise = catchup;
+		return catchup;
+	}
+
+	private async drainBackpressuredClientCatchupQueue(client: DaemonSocketClient): Promise<void> {
+		while (
+			!client.socket.destroyed &&
+			!client.snapshotStreaming &&
+			!client.backpressured &&
+			client.catchupActiveSessionIds?.size
+		) {
+			await this.drainBackpressuredClientCatchups(client);
+		}
+	}
+
+	private async drainBackpressuredClientCatchups(client: DaemonSocketClient): Promise<void> {
 		if (client.socket.destroyed) {
 			return;
 		}
-		client.backpressured = false;
 		const pending = [...(client.catchupActiveSessionIds ?? [])].map((activeSessionId) => ({
 			activeSessionId,
 			purpose: client.catchupPurposes?.get(activeSessionId) ?? ("resync" as const),
@@ -4766,6 +4802,9 @@ export class AgentDaemon {
 							outboundType: message.type,
 							...("id" in message && typeof message.id === "string" ? { requestId: message.id } : {}),
 							...(hasDaemonOutboundActiveSessionId(message) ? { activeSessionId: message.activeSessionId } : {}),
+							...("snapshotId" in message && typeof message.snapshotId === "string"
+								? { snapshotId: message.snapshotId }
+								: {}),
 							...(message.type === "session_event" ? { sessionEventType: message.event.type } : {}),
 							payloadEncoding,
 							...(snapshotPurpose ? { snapshotPurpose } : {}),

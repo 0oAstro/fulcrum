@@ -50,6 +50,11 @@ import {
 } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "child_process";
 import {
+	buildDaemonUpdateRestartReport,
+	launchDaemonUpdateRestartCoordinator,
+	resolveDaemonUpdateRestartSocketPath,
+} from "../../cli/daemon-update-restart.js";
+import {
 	APP_NAME,
 	APP_TITLE,
 	getAgentDir,
@@ -63,9 +68,13 @@ import {
 } from "../../config.js";
 import { AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL, isAgentSessionMessage } from "../../core/agent-messages.js";
 import {
+	type AgentTracePreviewResult,
+	type AgentTraceUploadAllResult,
 	type AgentTraceUploadResult,
 	getPrimeAgentTraceCredential,
+	previewAgentTraceFile,
 	uploadAgentTraceFile,
+	uploadAllAgentTraces,
 } from "../../core/agent-traces.js";
 import { isNoModelsAvailableMessage } from "../../core/auth-guidance.js";
 import {
@@ -464,6 +473,11 @@ type GoalAnnouncementSnapshot = {
 
 type ModelFallbackWarningAction = "show" | "suppress";
 
+interface OnboardingSplashHandle {
+	showProgress(message: string): void;
+	dismiss(): void;
+}
+
 const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	off: "No reasoning",
 	minimal: "Very brief reasoning",
@@ -560,9 +574,10 @@ function getPayloadWorkingIndicatorOptions(
 	};
 }
 
-function updateArgsIncludeSelf(args: readonly string[]): boolean {
+export function updateArgsIncludeSelf(args: readonly string[]): boolean {
 	let selfFlag = false;
 	let extensionsOnlyFlag = false;
+	let positional: string | undefined;
 	for (let index = 0; index < args.length; index++) {
 		const arg = args[index];
 		if (arg === "--self") {
@@ -572,6 +587,10 @@ function updateArgsIncludeSelf(args: readonly string[]): boolean {
 		} else if (arg === "--extension") {
 			extensionsOnlyFlag = true;
 			index++;
+		} else if (arg === "--daemon-socket") {
+			index++;
+		} else if (arg && !arg.startsWith("-") && positional === undefined) {
+			positional = arg;
 		}
 	}
 	if (selfFlag) {
@@ -580,7 +599,6 @@ function updateArgsIncludeSelf(args: readonly string[]): boolean {
 	if (extensionsOnlyFlag) {
 		return false;
 	}
-	const positional = args.find((arg) => !arg.startsWith("-"));
 	if (!positional) {
 		return true;
 	}
@@ -605,6 +623,18 @@ export function buildUpdateRelaunchArgs(args: readonly string[], sessionFile: st
 	return relaunchArgs;
 }
 
+export function buildUpdateChildArgs(args: readonly string[], daemonSocketPath: string): string[] {
+	return args.includes("--daemon-socket") ? [...args] : [...args, "--daemon-socket", daemonSocketPath];
+}
+
+export function resolveInteractiveUpdateDaemonSocketPath(
+	args: readonly string[],
+	activeDaemonSocketPath: string,
+): string {
+	const socketFlagIndex = args.indexOf("--daemon-socket");
+	return socketFlagIndex === -1 ? activeDaemonSocketPath : (args[socketFlagIndex + 1] ?? activeDaemonSocketPath);
+}
+
 /**
  * Options for InteractiveMode initialization.
  */
@@ -625,6 +655,8 @@ export interface InteractiveModeOptions {
 	verbose?: boolean;
 	/** Agent execution boundary. InteractiveMode never talks directly to AgentSession for core execution. */
 	agentConnection: AgentConnection;
+	/** Exact daemon socket to preserve across an interactive self-update restart. */
+	daemonSocketPath?: string;
 	/**
 	 * Local-only host for in-process extension binding and callback-bearing session operations.
 	 * This must remain optional adapter glue, not a generic execution dependency.
@@ -809,6 +841,7 @@ export class InteractiveMode {
 	// Auto-retry state
 	private retryLoader: Loader | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
+	private traceUploadAllAbortController: AbortController | undefined = undefined;
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
@@ -1450,7 +1483,7 @@ export class InteractiveMode {
 			// the text was restored to the editor by onboarding, history, or a retry.
 			const images = this.collectImagesFor(userInput);
 			try {
-				await this.agentConnection.prompt(userInput, { images });
+				await this.agentConnection.prompt(userInput, { streamingBehavior: "steer", images });
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
@@ -1505,15 +1538,23 @@ export class InteractiveMode {
 		return true;
 	}
 
+	private async showOnboardingModelSelection(splash: OnboardingSplashHandle): Promise<void> {
+		try {
+			await this.showConfigurationMenu("models");
+		} finally {
+			splash.dismiss();
+		}
+	}
+
 	private async runOnboardingFlow(showPrimeCliSplash = this.shouldRunPrimeCliOnboardingSplash()): Promise<void> {
 		this.modelRegistry.refresh();
 		if (showPrimeCliSplash) {
-			const shouldContinue = await this.showOnboardingModelSelectionSplash();
-			if (!shouldContinue) {
+			const splash = await this.showOnboardingSplash("choose a model");
+			if (!splash) {
 				return;
 			}
 
-			await this.showConfigurationMenu("models");
+			await this.showOnboardingModelSelection(splash);
 			return;
 		}
 
@@ -1523,7 +1564,21 @@ export class InteractiveMode {
 			return;
 		}
 
-		await this.showConfigurationMenu("providers");
+		const splash = await this.showOnboardingSplash();
+		if (!splash) {
+			return;
+		}
+
+		splash.showProgress("Signing in to Prime Intellect...");
+		const authResult = await this.createAuthFlows().runPrimeInferenceLogin();
+		if (authResult.status !== "success") {
+			splash.dismiss();
+			return;
+		}
+
+		splash.showProgress("Preparing models...");
+		await this.prepareForModelSelectionAfterLogin(authResult);
+		await this.showOnboardingModelSelection(splash);
 	}
 
 	private getMarkdownThemeWithSettings(): MarkdownTheme {
@@ -2456,6 +2511,7 @@ export class InteractiveMode {
 			this.isAgentCompacting() ||
 			this.isBashRunning() ||
 			this.getRetryAttempt() > 0 ||
+			this.traceUploadAllAbortController !== undefined ||
 			this.sideQuestionEvent?.status === "running"
 		);
 	}
@@ -6015,6 +6071,7 @@ export class InteractiveMode {
 	}
 
 	private interruptOrClearInput(): void {
+		this.traceUploadAllAbortController?.abort(new Error("Trace upload cancelled"));
 		if (this.sideQuestionEvent?.status === "running") {
 			this.abortSideQuestion(this.sideQuestionEvent.id, true);
 		}
@@ -7220,13 +7277,6 @@ export class InteractiveMode {
 				hide();
 				resolve();
 			};
-			const restore = () => {
-				if (settled) return;
-				hidden = false;
-				handle?.setHidden(false);
-				handle?.focus();
-				this.ui.requestRender();
-			};
 			const refreshModels = (force: boolean) => {
 				const refreshPromise = this.getModelSelectorRefreshPromise({ force });
 				if (!refreshPromise) return;
@@ -7240,12 +7290,11 @@ export class InteractiveMode {
 			};
 			const authenticate = (provider: AuthSelectorProvider, tab: "providers" | "mcp-connections") => {
 				if (settled) return;
-				handle?.setHidden(true);
 				void authFlows
 					.loginProvider(provider)
 					.then(async (authResult) => {
 						if (settled) return;
-						restore();
+						handle?.focus();
 						menu.refreshAuthentication();
 						if (authResult.status !== "success") return;
 
@@ -7266,7 +7315,7 @@ export class InteractiveMode {
 						refreshModels(true);
 					})
 					.catch((error) => {
-						restore();
+						handle?.focus();
 						this.showError(error instanceof Error ? error.message : String(error));
 					});
 			};
@@ -7682,36 +7731,44 @@ export class InteractiveMode {
 		}
 	}
 
-	private showOnboardingModelSelectionSplash(): Promise<boolean> {
+	private showOnboardingSplash(continueActionLabel?: string): Promise<OnboardingSplashHandle | undefined> {
 		return new Promise((resolve) => {
 			let settled = false;
+			let dismissed = false;
 			let handle: OverlayHandle | undefined;
 			let selector: PrimeOnboardingSplashComponent | undefined;
-			const settle = (result: boolean) => {
+			const settle = (result: OnboardingSplashHandle | undefined) => {
 				if (settled) {
 					return;
 				}
 				settled = true;
 				resolve(result);
 			};
-			const close = () => {
+			const dismiss = () => {
+				if (dismissed) {
+					return;
+				}
+				dismissed = true;
 				selector?.dispose();
 				handle?.hide();
 				this.ui.requestRender();
 			};
 			selector = new PrimeOnboardingSplashComponent(
 				() => {
-					close();
-					settle(true);
+					selector?.dispose();
+					settle({
+						showProgress: (message) => selector?.showProgress(message),
+						dismiss,
+					});
 				},
 				() => {
-					close();
-					settle(false);
+					dismiss();
+					settle(undefined);
 				},
 				{
 					getRows: () => this.ui.terminal.rows,
 					requestRender: () => this.ui.requestRender(),
-					continueActionLabel: "choose a model",
+					...(continueActionLabel ? { continueActionLabel } : {}),
 				},
 			);
 			handle = this.ui.showOverlay(selector, {
@@ -7871,16 +7928,25 @@ export class InteractiveMode {
 		const updateArgs = parseCommandArgs(args);
 		const includesSelf = updateArgsIncludeSelf(updateArgs);
 		const updateCwd = this.getCurrentCwd();
+		const daemonSocketPath = resolveInteractiveUpdateDaemonSocketPath(
+			updateArgs,
+			resolveDaemonUpdateRestartSocketPath(this.options.daemonSocketPath),
+		);
+		const updateChildArgs = includesSelf ? buildUpdateChildArgs(updateArgs, daemonSocketPath) : updateArgs;
 		this.stopWorkingLoader();
 		await this.ui.terminal.drainInput(1000).catch(() => undefined);
 		this.ui.stop();
 
 		const updateEnv = includesSelf ? { ...process.env, [SELF_UPDATE_INTERACTIVE_CHILD_ENV]: "1" } : process.env;
-		const updateResult = spawnSync(process.execPath, [...process.execArgv, entrypoint, "update", ...updateArgs], {
-			stdio: "inherit",
-			cwd: updateCwd,
-			env: updateEnv,
-		});
+		const updateResult = spawnSync(
+			process.execPath,
+			[...process.execArgv, entrypoint, "update", ...updateChildArgs],
+			{
+				stdio: "inherit",
+				cwd: updateCwd,
+				env: updateEnv,
+			},
+		);
 		const updateExitCode = updateResult.status ?? (updateResult.signal ? 1 : 0);
 		const selfUpdateNotAttempted =
 			includesSelf && !updateResult.error && updateExitCode === SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE;
@@ -7904,6 +7970,27 @@ export class InteractiveMode {
 				await this.options.onShutdown?.();
 			} catch {
 				// The update already completed; do not block relaunch on local teardown.
+			}
+			if (!updateResult.error && updateExitCode === 0) {
+				try {
+					const status = await launchDaemonUpdateRestartCoordinator({
+						socketPath: daemonSocketPath,
+						agentDir: getAgentDir(),
+						cwd: updateCwd,
+						originActiveSessionId: this.connectionState?.activeSessionId,
+					});
+					const report = buildDaemonUpdateRestartReport(status);
+					for (const message of report.info) {
+						console.log(message);
+					}
+					for (const warning of report.warnings) {
+						console.error(`Warning: ${warning}`);
+					}
+				} catch (error: unknown) {
+					console.error(
+						`Warning: updated, but could not coordinate the daemon restart (${error instanceof Error ? error.message : String(error)}).`,
+					);
+				}
 			}
 			const relaunchResult = spawnSync(process.execPath, [...process.execArgv, entrypoint, ...relaunchArgs], {
 				stdio: "inherit",
@@ -8324,9 +8411,9 @@ export class InteractiveMode {
 			case "missing_credentials":
 				return "Trace sharing needs a Prime API key. Run /traces login.";
 			case "no_session_file":
-				return "Trace sharing enabled. Current session will upload after the first assistant response.";
+				return "Current session has no persisted trace yet.";
 			case "empty_session":
-				return "Trace sharing enabled. Current session is empty.";
+				return "Current session trace is empty.";
 			case "invalid_session":
 				return `Trace upload skipped: ${result.message}.`;
 			case "too_large":
@@ -8345,7 +8432,83 @@ export class InteractiveMode {
 			sessionFile: state.sessionFile,
 			authStorage: this.modelRegistry.authStorage,
 			settingsManager: this.settingsManager,
+			requireEnabled: false,
 			reloadConfig: false,
+		});
+	}
+
+	private async previewCurrentTrace(): Promise<void> {
+		const state = await this.agentConnection.getState();
+		const result = await previewAgentTraceFile({ sessionFile: state.sessionFile });
+		let info: string;
+		switch (result.status) {
+			case "no_session_file":
+				info = "Trace preview is unavailable until the current session has a persisted assistant response.";
+				break;
+			case "empty_session":
+				info = "The current trace is empty.";
+				break;
+			case "invalid_session":
+			case "failed":
+				info = `Trace preview failed: ${result.message}.`;
+				break;
+			case "ready":
+				info = this.formatTracePreview(result);
+				break;
+		}
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(info, 1, 0));
+		this.ui.requestRender();
+	}
+
+	private formatTracePreview(result: Extract<AgentTracePreviewResult, { status: "ready" }>): string {
+		const lines = [
+			theme.bold("Trace Preview"),
+			theme.fg("dim", "Nothing has been uploaded by this command."),
+			"",
+			`${theme.fg("dim", "File:")} ${result.sessionFile}`,
+			`${theme.fg("dim", "Size:")} ${result.size.toLocaleString()} bytes`,
+			`${theme.fg("dim", "Uploadable:")} ${result.uploadable ? "Yes" : `No (limit ${result.maxBytes.toLocaleString()} bytes)`}`,
+			`${theme.fg("dim", "Endpoint:")} ${result.endpoint}`,
+			`${theme.fg("dim", "Session ID:")} ${result.sessionId}`,
+			`${theme.fg("dim", "Trace ID:")} ${result.traceId}`,
+		];
+		if (result.parentSessionId) {
+			lines.push(`${theme.fg("dim", "Parent session:")} ${result.parentSessionId}`);
+		}
+		if (result.gitRepo) {
+			lines.push(`${theme.fg("dim", "Git repository:")} ${result.gitRepo}`);
+		}
+		if (result.gitCommit) {
+			lines.push(`${theme.fg("dim", "Git commit:")} ${result.gitCommit}`);
+		}
+		lines.push("", theme.bold("Raw JSONL payload preview"));
+		if (result.contentPreview) {
+			lines.push(result.contentPreview);
+			if (result.truncated) {
+				lines.push("", theme.fg("dim", "Preview truncated; upload sends the complete file."));
+			}
+		} else {
+			lines.push(theme.fg("dim", "Payload omitted because the trace exceeds the upload limit."));
+		}
+		return lines.join("\n");
+	}
+
+	private async uploadAllTraces(sessionDir?: string, signal?: AbortSignal): Promise<AgentTraceUploadAllResult> {
+		return uploadAllAgentTraces({
+			authStorage: this.modelRegistry.authStorage,
+			settingsManager: this.settingsManager,
+			sessionDir,
+			requireEnabled: false,
+			reloadConfig: false,
+			signal,
+			onProgress: ({ completed, total }) => {
+				if (total > 0 && (completed === 0 || completed === total || completed % 10 === 0)) {
+					this.showStatus(
+						`Uploading traces: ${completed.toLocaleString()}/${total.toLocaleString()} (${keyText("app.clear")} to cancel)`,
+					);
+				}
+			},
 		});
 	}
 
@@ -8363,12 +8526,15 @@ export class InteractiveMode {
 			const info = [
 				theme.bold("Trace Sharing"),
 				"",
-				`${theme.fg("dim", "Status:")} ${this.settingsManager.getAgentTracesEnabled() ? "Enabled" : "Disabled"}`,
+				`${theme.fg("dim", "Automatic uploads:")} ${this.settingsManager.getAgentTracesEnabled() ? "Enabled" : "Disabled"}`,
 				`${theme.fg("dim", "Credential:")} ${credential?.label ?? "Not configured"}`,
 				`${theme.fg("dim", "Endpoint:")} ${resolvePrimeAgentTracesBaseUrl()}`,
 				`${theme.fg("dim", "Session file:")} ${state.sessionFile ?? "In-memory"}`,
 				"",
-				theme.fg("dim", "Commands: /traces on, /traces off, /traces upload, /traces login"),
+				theme.fg(
+					"dim",
+					"Commands: /traces on, /traces off, /traces preview, /traces upload-current, /traces upload-all, /traces login",
+				),
 			].join("\n");
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(new Text(info, 1, 0));
@@ -8385,6 +8551,11 @@ export class InteractiveMode {
 
 		if (command === "login") {
 			await this.createAuthFlows().runPrimeAgentTracesLogin();
+			return;
+		}
+
+		if (command === "preview") {
+			await this.previewCurrentTrace();
 			return;
 		}
 
@@ -8405,18 +8576,18 @@ export class InteractiveMode {
 			this.settingsManager.setAgentTracesEnabled(true);
 			await this.settingsManager.flush();
 			const uploadResult = await this.uploadCurrentTraceOnce();
-			const uploadMessage = this.formatTraceUploadResult(uploadResult);
-			this.showStatus(
+			const uploadMessage =
 				uploadResult.status === "no_session_file" || uploadResult.status === "empty_session"
-					? uploadMessage
-					: `Trace sharing enabled. ${uploadMessage}`,
-			);
+					? "Current session will upload after the first assistant response."
+					: this.formatTraceUploadResult(uploadResult);
+			this.showStatus(`Trace sharing enabled. ${uploadMessage}`);
 			return;
 		}
 
-		if (command === "upload") {
-			if (!this.settingsManager.getAgentTracesEnabled()) {
-				this.showStatus("Trace sharing is disabled. Run /traces on first.");
+		if (command === "upload" || command === "upload-current") {
+			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
+			if (!credential) {
+				this.showError("Trace sharing needs a Prime API key. Run /traces login.");
 				return;
 			}
 			const uploadResult = await this.uploadCurrentTraceOnce();
@@ -8429,7 +8600,52 @@ export class InteractiveMode {
 			return;
 		}
 
-		this.showWarning("Usage: /traces [status|on|off|upload|login]");
+		if (command === "upload-all") {
+			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
+			if (!credential) {
+				this.showError("Trace sharing needs a Prime API key. Run /traces login.");
+				return;
+			}
+			if (this.traceUploadAllAbortController) {
+				this.showWarning("A trace upload is already running. Cancel it before starting another.");
+				return;
+			}
+			const state = await this.agentConnection.getState();
+			const abortController = new AbortController();
+			this.traceUploadAllAbortController = abortController;
+			let result: AgentTraceUploadAllResult;
+			try {
+				result = await this.uploadAllTraces(state.sessionDir, abortController.signal);
+			} finally {
+				if (this.traceUploadAllAbortController === abortController) {
+					this.traceUploadAllAbortController = undefined;
+				}
+			}
+			if (abortController.signal.aborted) {
+				this.showStatus("Trace upload cancelled.");
+				return;
+			}
+			if (result.total === 0) {
+				this.showStatus("No persisted traces were found.");
+				return;
+			}
+			const summary = [
+				`Uploaded ${result.uploaded.toLocaleString()} of ${result.total.toLocaleString()} traces`,
+				result.skipped > 0 ? `${result.skipped.toLocaleString()} skipped` : undefined,
+				result.failed > 0 ? `${result.failed.toLocaleString()} failed` : undefined,
+				`${result.bytesStored.toLocaleString()} bytes stored`,
+			]
+				.filter((part): part is string => part !== undefined)
+				.join("; ");
+			if (result.failed > 0) {
+				this.showWarning(`${summary}. See ${getAgentTracesLogPath()} for details.`);
+			} else {
+				this.showStatus(`${summary}.`);
+			}
+			return;
+		}
+
+		this.showWarning("Usage: /traces [status|on|off|preview|upload|upload-current|upload-all|login]");
 	}
 
 	private async handleContextCommand(): Promise<void> {

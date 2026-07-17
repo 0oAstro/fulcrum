@@ -293,6 +293,14 @@ export type DaemonCommand =
 			supportsExtensionUi?: boolean;
 	  } & DaemonAttachClientMetadata &
 			DaemonClientEnv)
+	| ({
+			id?: string;
+			type: "reattach";
+			activeSessionId: string;
+			targetActiveSessionId: string;
+			supportsExtensionUi?: boolean;
+	  } & DaemonAttachClientMetadata &
+			DaemonClientEnv)
 	| { id?: string; type: "detach"; activeSessionId?: string }
 	| { id?: string; type: "kill"; activeSessionId: string }
 	| { id?: string; type: "rename"; activeSessionId: string; name: string }
@@ -335,6 +343,12 @@ export type DaemonCommand =
 			prefixMessages?: CustomMessage[];
 	  }
 	| { id?: string; type: "restore_next_turn"; activeSessionId: string; messages: CustomMessage[] }
+	| {
+			id?: string;
+			type: "append_custom_message";
+			activeSessionId: string;
+			message: Pick<CustomMessage, "customType" | "content" | "display" | "details">;
+	  }
 	| { id?: string; type: "resume_queue"; activeSessionId: string }
 	| {
 			id?: string;
@@ -681,6 +695,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"list",
 	"list_saved_sessions",
 	"attach",
+	"reattach",
 	"agent_messages_status",
 	"wait_for_idle",
 	"get_state",

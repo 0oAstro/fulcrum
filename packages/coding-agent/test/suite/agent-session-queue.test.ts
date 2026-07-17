@@ -25,14 +25,14 @@ type AutoRefineInternals = {
 	_scheduleAutoRefine(reason: AutoRefineReason): void;
 	_scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void;
 	_scheduleAutoRefineAfterAgentEnd(): void;
-	_scheduleQueuedContinue(): void;
+	_schedulePostCompactionContinue(): void;
 	_invalidatePendingAutoRefineForBranchChange(): Promise<void>;
-	_cancelQueuedContinue(): void;
+	_cancelPostCompactionContinue(): void;
 	_assistantTurnsSinceAutoRefine: number;
 	_lastAutoRefineReviewAt: number;
 	_compactAutoRefinePending: boolean;
 	_turnIntervalAutoRefinePending: boolean;
-	_queuedContinueScheduled: boolean;
+	_postCompactionContinuationScheduled: boolean;
 	_pendingAutoRefineReview?: unknown;
 	_autoRefineInProgress: boolean;
 	_autoRefineBranchVersion: number;
@@ -245,13 +245,13 @@ describe("AgentSession queue characterization", () => {
 		const internals = harness.session as unknown as AutoRefineInternals;
 		const scheduleAutoRefine = vi.spyOn(internals, "_scheduleAutoRefine").mockImplementation(() => {});
 		internals._compactAutoRefinePending = true;
-		internals._queuedContinueScheduled = true;
+		internals._postCompactionContinuationScheduled = true;
 
 		internals._scheduleAutoRefineAfterAgentEnd();
 
 		expect(scheduleAutoRefine).not.toHaveBeenCalled();
 
-		internals._queuedContinueScheduled = false;
+		internals._postCompactionContinuationScheduled = false;
 		internals._scheduleAutoRefineAfterAgentEnd();
 
 		expect(scheduleAutoRefine).toHaveBeenCalledWith("compact");
@@ -324,16 +324,16 @@ describe("AgentSession queue characterization", () => {
 			.mockResolvedValueOnce();
 
 		try {
-			internals._scheduleQueuedContinue();
+			internals._schedulePostCompactionContinue();
 			await vi.advanceTimersByTimeAsync(100);
 
 			expect(continueAgent).toHaveBeenCalledTimes(1);
-			expect(internals._queuedContinueScheduled).toBe(true);
+			expect(internals._postCompactionContinuationScheduled).toBe(true);
 
 			await vi.advanceTimersByTimeAsync(100);
 
 			expect(continueAgent).toHaveBeenCalledTimes(2);
-			expect(internals._queuedContinueScheduled).toBe(false);
+			expect(internals._postCompactionContinuationScheduled).toBe(false);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -349,12 +349,12 @@ describe("AgentSession queue characterization", () => {
 		const continueAgent = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 
 		try {
-			internals._scheduleQueuedContinue();
+			internals._schedulePostCompactionContinue();
 			await internals._invalidatePendingAutoRefineForBranchChange();
 			await vi.advanceTimersByTimeAsync(100);
 
 			expect(continueAgent).not.toHaveBeenCalled();
-			expect(internals._queuedContinueScheduled).toBe(false);
+			expect(internals._postCompactionContinuationScheduled).toBe(false);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -368,13 +368,13 @@ describe("AgentSession queue characterization", () => {
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
 		try {
-			internals._scheduleQueuedContinue();
+			internals._schedulePostCompactionContinue();
 
 			await expect(harness.session.compact()).rejects.toThrow("Session is too short to compact");
 
-			expect(internals._queuedContinueScheduled).toBe(true);
+			expect(internals._postCompactionContinuationScheduled).toBe(true);
 		} finally {
-			internals._cancelQueuedContinue();
+			internals._cancelPostCompactionContinue();
 			vi.useRealTimers();
 		}
 	});

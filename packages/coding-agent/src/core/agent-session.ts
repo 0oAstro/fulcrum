@@ -456,6 +456,7 @@ interface InternalPromptOptions extends PromptOptions {
 	skipPrePromptWork?: boolean;
 	returnAfterAccepted?: boolean;
 	agentMessageId?: string;
+	resumeIfIdle?: boolean;
 }
 
 type QueuedAgentMessage = UserMessage | CustomMessage;
@@ -793,6 +794,9 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _agentEventQueue: Promise<void> = Promise.resolve();
+	private _pendingMessageResumeQueue: Promise<void> = Promise.resolve();
+	private _pendingMessageResumeEpoch = 0;
+	private _pendingMessageResumeRequested = false;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: QueuedSteeringMessage[] = [];
@@ -919,8 +923,8 @@ export class AgentSession {
 	private _autoRefineInProgress = false;
 	private _compactAutoRefinePending = false;
 	private _turnIntervalAutoRefinePending = false;
-	private _queuedContinueScheduled = false;
-	private _queuedContinueTimer: ReturnType<typeof setTimeout> | undefined;
+	private _postCompactionContinuationScheduled = false;
+	private _postCompactionContinuationTimer: ReturnType<typeof setTimeout> | undefined;
 	private _postCompactionContinuationMessages: AgentMessage[] = [];
 	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
 	private _queuedAutonomousContinuationSnapshots = new WeakMap<AgentMessage, AutonomousRuntimeSnapshot>();
@@ -1093,6 +1097,9 @@ export class AgentSession {
 	}
 
 	private _emitQueueUpdate(): void {
+		if (this.pendingMessageCount === 0) {
+			this._pendingMessageResumeRequested = false;
+		}
 		this._emit({
 			type: "queue_update",
 			steering: this._steeringMessages.map(queuedAgentMessagePreview),
@@ -1715,7 +1722,7 @@ export class AgentSession {
 			this._continueAfterThresholdCompaction = false;
 		}
 		if (!this.agent.hasQueuedMessages()) {
-			this._cancelQueuedContinue();
+			this._cancelPostCompactionContinue();
 		}
 	}
 
@@ -2381,6 +2388,7 @@ export class AgentSession {
 			this._retryResolve();
 			this._retryResolve = undefined;
 			this._retryPromise = undefined;
+			this._schedulePendingMessageResume();
 		}
 	}
 
@@ -2586,7 +2594,7 @@ export class AgentSession {
 			// resolution cannot write harness state or re-subscribe handlers.
 			this._autoRefineReviewAbort?.abort();
 			this._refineAbortController?.abort();
-			this._discardPendingAutoRefine({ cancelQueuedContinue: true });
+			this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 			this._autoRefineBranchVersion++;
 			this._cancelActiveRlmChildRuns("Parent session disposed");
 			for (const unsubscribe of this._retainedRlmChildUnsubscribes.values()) {
@@ -2928,6 +2936,7 @@ export class AgentSession {
 		await this._promptInjectedMessage(job.prompt, message, {
 			...options,
 			followUpQueueKey: options?.followUpQueueKey ?? `heartbeat:${job.id}`,
+			resumeIfIdle: true,
 		});
 	}
 
@@ -2974,6 +2983,7 @@ export class AgentSession {
 						queueKey: options.followUpQueueKey,
 						previewLabel,
 						suppressAutonomousContinuation: options.suppressAutonomousContinuation,
+						resumeIfIdle: options.resumeIfIdle,
 					},
 				);
 				if (!queued) {
@@ -3068,6 +3078,7 @@ export class AgentSession {
 					queueKey: options.followUpQueueKey,
 					previewLabel,
 					suppressAutonomousContinuation: options.suppressAutonomousContinuation,
+					resumeIfIdle: options.resumeIfIdle,
 				},
 			);
 			if (!queued) {
@@ -3191,7 +3202,9 @@ export class AgentSession {
 			const shouldQueueForStreaming = this.isStreaming;
 			const shouldQueueForPendingWork = hasQueueIfBusyBackpressure();
 			const shouldQueueUserPromptBehindExistingMessages =
-				options?.agentMessageId === undefined && this._queuedContinueScheduled && this.pendingMessageCount > 0;
+				options?.agentMessageId === undefined &&
+				this._pendingMessageResumeRequested &&
+				this.pendingMessageCount > 0;
 			const shouldQueueForRefinement = options?.agentMessageId === undefined && this.isRefining;
 			if (
 				shouldQueueForStreaming ||
@@ -3220,6 +3233,7 @@ export class AgentSession {
 						agentMessageId: options?.agentMessageId,
 						suppressAutonomousContinuation: options?.suppressAutonomousContinuation,
 						customMessage: options?.customMessage,
+						resumeIfIdle: options?.resumeIfIdle || shouldQueueForRefinement,
 					},
 				);
 				if (!queued) {
@@ -3416,6 +3430,7 @@ export class AgentSession {
 					agentMessageId: options?.agentMessageId,
 					suppressAutonomousContinuation: options?.suppressAutonomousContinuation,
 					customMessage: options?.customMessage,
+					resumeIfIdle: options?.resumeIfIdle || refiningAtHandoff,
 				},
 			);
 			if (!queued) {
@@ -3482,6 +3497,7 @@ export class AgentSession {
 				) {
 					this._acceptedAgentMessagePrompt = undefined;
 				}
+				this._schedulePendingMessageResume();
 			})
 			.catch(() => undefined);
 		if (options?.returnAfterAccepted) {
@@ -3571,7 +3587,7 @@ export class AgentSession {
 	async steer(
 		text: string,
 		images?: ImageContent[],
-		options: { queueKey?: string; agentMessageId?: string } = {},
+		options: { queueKey?: string; agentMessageId?: string; resumeIfIdle?: boolean } = {},
 	): Promise<void> {
 		// Check for extension commands (cannot be queued)
 		if (text.startsWith("/")) {
@@ -3585,6 +3601,7 @@ export class AgentSession {
 		await this._queueSteer(expandedText, images, {
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
+			resumeIfIdle: options.resumeIfIdle,
 		});
 	}
 
@@ -3598,7 +3615,7 @@ export class AgentSession {
 	async followUp(
 		text: string,
 		images?: ImageContent[],
-		options: { queueKey?: string; agentMessageId?: string } = {},
+		options: { queueKey?: string; agentMessageId?: string; resumeIfIdle?: boolean } = {},
 	): Promise<boolean> {
 		// Check for extension commands (cannot be queued)
 		if (text.startsWith("/")) {
@@ -3612,6 +3629,7 @@ export class AgentSession {
 		return this._queueFollowUp(expandedText, images, {
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
+			resumeIfIdle: options.resumeIfIdle,
 		});
 	}
 
@@ -3673,6 +3691,7 @@ export class AgentSession {
 			agentMessageId?: string;
 			customMessage?: CustomMessage;
 			suppressAutonomousContinuation?: boolean;
+			resumeIfIdle?: boolean;
 		} = {},
 	): Promise<boolean> {
 		const pendingNextTurnMessages = this._pendingNextTurnMessages;
@@ -3684,6 +3703,7 @@ export class AgentSession {
 					agentMessageId: options.agentMessageId,
 					message: options.customMessage,
 					prefixMessages: pendingNextTurnMessages,
+					resumeIfIdle: options.resumeIfIdle,
 				});
 				if (!queued) {
 					this._pendingNextTurnMessages.unshift(...pendingNextTurnMessages);
@@ -3696,6 +3716,7 @@ export class AgentSession {
 				message: options.customMessage,
 				prefixMessages: pendingNextTurnMessages,
 				suppressAutonomousContinuation: options.suppressAutonomousContinuation,
+				resumeIfIdle: options.resumeIfIdle,
 			});
 			return true;
 		} catch (error) {
@@ -3708,7 +3729,12 @@ export class AgentSession {
 		text: string,
 		message: CustomMessage,
 		streamingBehavior: "steer" | "followUp",
-		options: { queueKey?: string; previewLabel?: string; suppressAutonomousContinuation?: boolean } = {},
+		options: {
+			queueKey?: string;
+			previewLabel?: string;
+			suppressAutonomousContinuation?: boolean;
+			resumeIfIdle?: boolean;
+		} = {},
 	): Promise<boolean> {
 		const pendingNextTurnMessages = this._pendingNextTurnMessages;
 		this._pendingNextTurnMessages = [];
@@ -3720,6 +3746,7 @@ export class AgentSession {
 					prefixMessages: pendingNextTurnMessages,
 					previewLabel: options.previewLabel,
 					suppressAutonomousContinuation: options.suppressAutonomousContinuation,
+					resumeIfIdle: options.resumeIfIdle,
 				});
 				if (!queued) {
 					this._pendingNextTurnMessages.unshift(...pendingNextTurnMessages);
@@ -3732,6 +3759,7 @@ export class AgentSession {
 				previewLabel: options.previewLabel,
 				queueKey: options.queueKey,
 				suppressAutonomousContinuation: options.suppressAutonomousContinuation,
+				resumeIfIdle: options.resumeIfIdle,
 			});
 			return true;
 		} catch (error) {
@@ -3754,6 +3782,7 @@ export class AgentSession {
 			prefixMessages?: CustomMessage[];
 			previewLabel?: string;
 			suppressAutonomousContinuation?: boolean;
+			resumeIfIdle?: boolean;
 		} = {},
 	): Promise<void> {
 		const content = options.content ?? this._buildPromptContent(text, images);
@@ -3777,6 +3806,9 @@ export class AgentSession {
 		});
 		this.agent.steer(options.prefixMessages?.length ? [...options.prefixMessages, message] : message);
 		this._emitQueueUpdate();
+		if (options.resumeIfIdle) {
+			this._schedulePendingMessageResume(true);
+		}
 	}
 
 	/**
@@ -3793,6 +3825,7 @@ export class AgentSession {
 			prefixMessages?: CustomMessage[];
 			previewLabel?: string;
 			suppressAutonomousContinuation?: boolean;
+			resumeIfIdle?: boolean;
 		} = {},
 	): Promise<boolean> {
 		if (options.queueKey && this._followUpMessages.some((message) => message.queueKey === options.queueKey)) {
@@ -3819,7 +3852,92 @@ export class AgentSession {
 		});
 		this.agent.followUp(options.prefixMessages?.length ? [...options.prefixMessages, message] : message);
 		this._emitQueueUpdate();
+		if (options.resumeIfIdle) {
+			this._schedulePendingMessageResume(true);
+		}
 		return true;
+	}
+
+	private _schedulePendingMessageResume(request = false): void {
+		if (request) {
+			this._pendingMessageResumeRequested = true;
+		}
+		if (this._disposed || this._disposing || this.pendingMessageCount === 0) {
+			if (this.pendingMessageCount === 0) {
+				this._pendingMessageResumeRequested = false;
+			}
+			return;
+		}
+		if (!this._pendingMessageResumeRequested) {
+			return;
+		}
+		const epoch = this._pendingMessageResumeEpoch;
+		const resume = () => this._resumePendingMessages(epoch);
+		this._pendingMessageResumeQueue = this._pendingMessageResumeQueue.then(resume, resume);
+		this._pendingMessageResumeQueue.catch(() => {});
+	}
+
+	private async _resumePendingMessages(epoch: number): Promise<void> {
+		try {
+			while (
+				!this._disposed &&
+				!this._disposing &&
+				this._pendingMessageResumeRequested &&
+				epoch === this._pendingMessageResumeEpoch &&
+				this.pendingMessageCount > 0
+			) {
+				await this.agent.waitForIdle();
+				await this._agentEventQueue;
+				await this._waitForRefineIdle();
+				if (epoch !== this._pendingMessageResumeEpoch) {
+					return;
+				}
+
+				const blockingOperations = [this._compactionOperation, this._branchSummaryOperation].filter(
+					(operation): operation is Promise<void> => operation !== undefined,
+				);
+				if (blockingOperations.length > 0) {
+					await Promise.allSettled(blockingOperations);
+					continue;
+				}
+				if (this.isRetrying) {
+					await this.waitForRetry();
+					continue;
+				}
+				const acceptedPrompts = [...this._acceptedPromptCompletions];
+				if (acceptedPrompts.length > 0) {
+					await Promise.allSettled(acceptedPrompts);
+					continue;
+				}
+
+				if (
+					this._disposed ||
+					this._disposing ||
+					epoch !== this._pendingMessageResumeEpoch ||
+					this.pendingMessageCount === 0
+				) {
+					return;
+				}
+				if (this.isBashRunning || this.isCompacting || this.isRetrying || this.hasAcceptedPromptInFlight) {
+					return;
+				}
+
+				await this.agent.waitForIdle();
+				if (epoch !== this._pendingMessageResumeEpoch || this.pendingMessageCount === 0) {
+					return;
+				}
+				this._flushPendingBashMessages();
+				if (this._pendingNextTurnMessages.length > 0) {
+					await this._drainQueuedMessagesAfterBash();
+				} else {
+					await this.agent.continue();
+				}
+			}
+		} finally {
+			if (epoch === this._pendingMessageResumeEpoch && this.pendingMessageCount === 0) {
+				this._pendingMessageResumeRequested = false;
+			}
+		}
 	}
 
 	/**
@@ -3917,11 +4035,12 @@ export class AgentSession {
 		}
 
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
-		await this.prompt(text, {
+		await this._prompt(text, {
 			expandPromptTemplates: false,
 			streamingBehavior: options?.deliverAs,
 			images,
 			source: "extension",
+			resumeIfIdle: true,
 		});
 	}
 
@@ -4092,6 +4211,8 @@ export class AgentSession {
 		this.abortCompaction();
 		this.abortBranchSummary();
 		this.abortBash();
+		this._pendingMessageResumeRequested = false;
+		this._pendingMessageResumeEpoch++;
 		this.agent.abort();
 	}
 
@@ -4118,6 +4239,8 @@ export class AgentSession {
 
 	abortForUpdateRestart(): void {
 		this.abortRetry();
+		this._pendingMessageResumeRequested = false;
+		this._pendingMessageResumeEpoch++;
 		this._cancelActiveRlmChildRuns("Parent session aborted for update restart");
 		this._goalAbortInProgress = this._goalState.status === "active";
 		this.agent.abort();
@@ -4549,7 +4672,7 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
-		const hadQueuedContinue = this._queuedContinueScheduled;
+		const hadPostCompactionContinue = this._postCompactionContinuationScheduled;
 		this._disconnectFromAgent();
 		await this.abort();
 		let didCompact = false;
@@ -4610,10 +4733,11 @@ export class AgentSession {
 				this._compactionOperation = undefined;
 			}
 			resolveCompactionOperation();
+			this._schedulePendingMessageResume();
 			if (didCompact) {
-				this._discardPendingAutoRefine({ cancelQueuedContinue: true });
-				if (hadQueuedContinue) {
-					this._scheduleQueuedContinue();
+				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+				if (hadPostCompactionContinue) {
+					this._schedulePostCompactionContinue();
 				}
 				this._scheduleAutoRefine("compact");
 			}
@@ -4722,26 +4846,26 @@ export class AgentSession {
 		return this._rlmDepth === 0 && this._localHarnessStateDir() !== undefined;
 	}
 
-	private _cancelQueuedContinue(): void {
-		if (this._queuedContinueTimer) {
-			clearTimeout(this._queuedContinueTimer);
-			this._queuedContinueTimer = undefined;
+	private _cancelPostCompactionContinue(): void {
+		if (this._postCompactionContinuationTimer) {
+			clearTimeout(this._postCompactionContinuationTimer);
+			this._postCompactionContinuationTimer = undefined;
 		}
-		this._queuedContinueScheduled = false;
+		this._postCompactionContinuationScheduled = false;
 	}
 
-	private _discardPendingAutoRefine(options: { cancelQueuedContinue?: boolean } = {}): void {
+	private _discardPendingAutoRefine(options: { cancelPostCompactionContinue?: boolean } = {}): void {
 		this._compactAutoRefinePending = false;
 		this._turnIntervalAutoRefinePending = false;
 		this._pendingAutoRefineReview = undefined;
-		if (options.cancelQueuedContinue) {
-			this._cancelQueuedContinue();
+		if (options.cancelPostCompactionContinue) {
+			this._cancelPostCompactionContinue();
 		}
 	}
 
 	private async _invalidatePendingAutoRefineForBranchChange(): Promise<void> {
 		this._autoRefineReviewAbort?.abort();
-		this._discardPendingAutoRefine({ cancelQueuedContinue: true });
+		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 		this._assistantTurnsSinceAutoRefine = 0;
 		this._autoRefineBranchVersion++;
 		await this._waitForRefineIdle();
@@ -4756,7 +4880,7 @@ export class AgentSession {
 			return;
 		}
 		if (this._compactAutoRefinePending) {
-			if (this._queuedContinueScheduled) {
+			if (this._postCompactionContinuationScheduled) {
 				return;
 			}
 			this._scheduleAutoRefine("compact");
@@ -4778,35 +4902,29 @@ export class AgentSession {
 		this._scheduleAutoRefine("compact");
 	}
 
-	private _scheduleQueuedContinue(): void {
-		if (this._queuedContinueScheduled) {
+	private _schedulePostCompactionContinue(): void {
+		if (this._postCompactionContinuationScheduled) {
 			return;
 		}
-		this._queuedContinueScheduled = true;
-		this._queuedContinueTimer = setTimeout(() => {
-			this._queuedContinueTimer = undefined;
-			void this._runScheduledQueuedContinue();
+		this._postCompactionContinuationScheduled = true;
+		this._postCompactionContinuationTimer = setTimeout(() => {
+			this._postCompactionContinuationTimer = undefined;
+			void this._runScheduledPostCompactionContinue();
 		}, 100);
 	}
 
-	private async _runScheduledQueuedContinue(): Promise<void> {
+	private async _runScheduledPostCompactionContinue(): Promise<void> {
 		await this._waitForRefineIdle();
-		if (!this._queuedContinueScheduled) {
+		if (!this._postCompactionContinuationScheduled) {
 			return;
 		}
-		if (
-			this.isStreaming ||
-			this.isCompacting ||
-			this.isRetrying ||
-			this.isBashRunning ||
-			this.hasAcceptedPromptInFlight
-		) {
-			this._queuedContinueScheduled = false;
-			this._scheduleQueuedContinue();
+		if (this.isStreaming || this.isCompacting) {
+			this._postCompactionContinuationScheduled = false;
+			this._schedulePostCompactionContinue();
 			return;
 		}
 
-		this._queuedContinueScheduled = false;
+		this._postCompactionContinuationScheduled = false;
 		const continuationMessages = [...this._postCompactionContinuationMessages];
 		try {
 			await this.agent.continue();
@@ -4814,7 +4932,7 @@ export class AgentSession {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			if (message.includes("already processing")) {
-				this._scheduleQueuedContinue();
+				this._schedulePostCompactionContinue();
 			}
 		}
 	}
@@ -5059,9 +5177,7 @@ export class AgentSession {
 		} finally {
 			if (this._refineInFlight === settled) {
 				this._refineInFlight = undefined;
-				if (this.agent.hasQueuedMessages()) {
-					this._scheduleQueuedContinue();
-				}
+				this._schedulePendingMessageResume();
 				this._emit({ type: "refinement_end" });
 			}
 		}
@@ -5336,7 +5452,7 @@ export class AgentSession {
 		// A requested compaction stopped the loop on purpose; don't stall if it fails.
 		const resumeAfterFailure = () => {
 			if (reason === "requested" && (shouldContinueAfterCompaction || this.agent.hasQueuedMessages())) {
-				this._scheduleQueuedContinue();
+				this._schedulePostCompactionContinue();
 			}
 		};
 
@@ -5396,13 +5512,13 @@ export class AgentSession {
 					this.agent.state.messages = messages.slice(0, -1);
 				}
 
-				this._scheduleQueuedContinue();
+				this._schedulePostCompactionContinue();
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
 				return true;
 			} else if (shouldContinueAfterCompaction || hasQueuedMessages) {
 				// Compaction can intentionally stop a tool loop between turns.
 				// Queued follow-up/steering/custom messages can also be waiting.
-				this._scheduleQueuedContinue();
+				this._schedulePostCompactionContinue();
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
 			} else {
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
@@ -5462,6 +5578,7 @@ export class AgentSession {
 			return false;
 		} finally {
 			this._autoCompactionAbortController = undefined;
+			this._schedulePendingMessageResume();
 		}
 	}
 
@@ -7200,7 +7317,7 @@ export class AgentSession {
 		}
 		if (this._retryAttempt > 0) {
 			this._autoCompactionAbortController?.abort();
-			this._cancelQueuedContinue();
+			this._cancelPostCompactionContinue();
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
@@ -7331,7 +7448,10 @@ export class AgentSession {
 		) {
 			return;
 		}
+		await this._promptPendingMessagesWithNextTurnContext();
+	}
 
+	private async _promptPendingMessagesWithNextTurnContext(): Promise<void> {
 		const steeringMessages = [...this._steeringMessages];
 		const followUpMessages = [...this._followUpMessages];
 		const drainedSteeringMessages = steeringMessages.length > 0 ? steeringMessages : [];
@@ -7733,6 +7853,7 @@ export class AgentSession {
 				this._branchSummaryOperation = undefined;
 			}
 			resolveBranchSummaryOperation();
+			this._schedulePendingMessageResume();
 		}
 	}
 
