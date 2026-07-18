@@ -3246,7 +3246,8 @@ export class AgentSession {
 						agentMessageId: options?.agentMessageId,
 						suppressAutonomousContinuation: options?.suppressAutonomousContinuation,
 						customMessage: options?.customMessage,
-						resumeIfIdle: options?.resumeIfIdle || shouldQueueForRefinement,
+						resumeIfIdle:
+							options?.resumeIfIdle || shouldQueueForRefinement || shouldQueueUserPromptBehindExistingMessages,
 					},
 				);
 				if (!queued) {
@@ -3723,6 +3724,7 @@ export class AgentSession {
 					agentMessageId: options.agentMessageId,
 					message: options.customMessage,
 					prefixMessages: pendingNextTurnMessages,
+					suppressAutonomousContinuation: options.suppressAutonomousContinuation,
 					resumeIfIdle: options.resumeIfIdle,
 				});
 				if (!queued) {

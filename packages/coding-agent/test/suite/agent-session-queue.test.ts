@@ -1283,6 +1283,26 @@ describe("AgentSession queue characterization", () => {
 		expect(getAssistantTexts(harness)).toEqual(["first reply", "second reply"]);
 	});
 
+	it("re-arms resume when an early prompt queues behind pending work", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("first reply"), fauxAssistantMessage("second reply")]);
+		const internals = harness.session as unknown as {
+			_compactionAbortController?: AbortController;
+			_pendingMessageResumeQueue: Promise<void>;
+		};
+		internals._compactionAbortController = new AbortController();
+		await harness.session.followUp("already queued", undefined, { resumeIfIdle: true });
+		await internals._pendingMessageResumeQueue;
+		internals._compactionAbortController = undefined;
+
+		await harness.session.prompt("queued at early gate");
+
+		await vi.waitFor(() => expect(harness.session.pendingMessageCount).toBe(0));
+		expect(getUserTexts(harness)).toEqual(["already queued", "queued at early gate"]);
+		expect(getAssistantTexts(harness)).toEqual(["first reply", "second reply"]);
+	});
+
 	it("resumes queued prompts after refinement failure", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
