@@ -34,7 +34,6 @@ import {
 	CombinedAutocompleteProvider,
 	type Component,
 	Container,
-	fuzzyFilter,
 	Loader,
 	type LoaderIndicatorOptions,
 	Markdown,
@@ -135,6 +134,7 @@ import type {
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionHeartbeat,
 	AgentConnectionModel,
+	AgentConnectionModelCatalog,
 	AgentConnectionQueueState,
 	AgentConnectionResourceDiagnostic,
 	AgentConnectionResourceSnapshot,
@@ -150,6 +150,7 @@ import type {
 	AgentConnectionState,
 	AgentConnectionToolDefinition,
 } from "../agent-connection/index.js";
+import { getModelArgumentCompletions } from "../model-autocomplete.js";
 import {
 	checkForPackageUpdates,
 	checkTmuxKeyboardSetup,
@@ -206,6 +207,7 @@ import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
 import { FeatureHintDeck } from "./feature-hints.js";
+import { scopeHeartbeatsToSession } from "./heartbeat-scope.js";
 import { collectMarkedImages, evictImagesToBudget, formatImageMarker, imageMarkerIds } from "./image-markers.js";
 import type {
 	InteractiveModeLocalSessionHost,
@@ -339,6 +341,7 @@ function childAgentSummaryChanged(
 	const nextTokens = next.tokenCount === undefined ? undefined : formatTokenCount(next.tokenCount);
 	return (
 		previous.parentId !== next.parentId ||
+		previous.activeSessionId !== next.activeSessionId ||
 		previous.sessionName !== next.sessionName ||
 		previous.model !== next.model ||
 		previous.label !== next.label ||
@@ -824,12 +827,15 @@ export class InteractiveMode {
 	private skillCommands = new Map<string, string>();
 	private connectionCommands: AgentConnectionSlashCommand[] = [];
 	private connectionModels: AgentConnectionModel[] = [];
+	private connectionModelCatalog: AgentConnectionModel[] = [];
+	private connectionConfiguredProviders = new Set<string>();
 	private connectionModelsFetchedAt = 0;
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
 	private sessionHasMessages = false;
+	private heartbeatCatalog: AgentConnectionHeartbeat[] = [];
 	private heartbeats: AgentConnectionHeartbeat[] = [];
 	private heartbeatRefreshPromise: Promise<void> | undefined;
 	private heartbeatRefreshRequested = false;
@@ -1108,32 +1114,8 @@ export class InteractiveMode {
 
 		const modelCommand = slashCommands.find((command) => command.name === "model");
 		if (modelCommand) {
-			modelCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
-				const models =
-					this.connectionState && this.connectionState.scopedModels.length > 0
-						? this.connectionState.scopedModels.map((s) => s.model)
-						: this.connectionModels;
-
-				if (models.length === 0) return null;
-
-				// Create items with provider/id format
-				const items = models.map((m) => ({
-					id: m.id,
-					provider: m.provider,
-					label: `${m.provider}/${m.id}`,
-				}));
-
-				// Fuzzy filter by model ID + provider (allows "opus anthropic" to match)
-				const filtered = fuzzyFilter(items, prefix, (item) => `${item.id} ${item.provider}`);
-
-				if (filtered.length === 0) return null;
-
-				return filtered.map((item) => ({
-					value: item.label,
-					label: item.id,
-					description: item.provider,
-				}));
-			};
+			modelCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
+				getModelArgumentCompletions(prefix, this.getCachedModelCandidates());
 		}
 
 		const effortCommand = slashCommands.find((command) => command.name === "effort");
@@ -2327,15 +2309,15 @@ export class InteractiveMode {
 
 	private async refreshConnectionCatalog(): Promise<void> {
 		this.invalidateConnectionModelRefresh();
-		const [state, commands, models, resources] = await Promise.all([
+		const [state, commands, modelCatalog, resources] = await Promise.all([
 			this.agentConnection.getState(),
 			this.agentConnection.getCommands(),
-			this.agentConnection.getAvailableModels(),
+			this.agentConnection.getModelCatalog(),
 			this.agentConnection.getResourceSnapshot(),
 		]);
 		this.applyConnectionStateSnapshot(state);
 		this.connectionCommands = commands;
-		this.connectionModels = models;
+		this.applyConnectionModelCatalog(modelCatalog);
 		this.connectionModelsFetchedAt = Date.now();
 		this.connectionResourceSnapshot = resources;
 	}
@@ -2363,6 +2345,22 @@ export class InteractiveMode {
 	}
 
 	private applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[]): void {
+		this.heartbeatCatalog = heartbeats;
+		this.updateScopedHeartbeats();
+	}
+
+	private updateScopedHeartbeats(): void {
+		const heartbeats = scopeHeartbeatsToSession(
+			this.heartbeatCatalog,
+			this.connectionState,
+			this.childAgentSnapshots.values(),
+		);
+		if (
+			heartbeats.length === this.heartbeats.length &&
+			heartbeats.every((heartbeat, index) => heartbeat === this.heartbeats[index])
+		) {
+			return;
+		}
 		this.heartbeats = heartbeats;
 		this.heartbeatManager?.setHeartbeats(heartbeats);
 		this.scheduleHeartbeatManagerRefresh();
@@ -2373,6 +2371,7 @@ export class InteractiveMode {
 	private applyConnectionStateSnapshot(state: AgentConnectionState): void {
 		this.bindPromptStashSession(state.sessionId);
 		this.connectionState = state;
+		this.updateScopedHeartbeats();
 		// Don't touch contextUsageTokenBaseline: a mid-stream snapshot reflects only completed
 		// turns (the in-flight message isn't persisted yet), so the in-flight delta must keep
 		// accumulating. The baseline is managed at turn end (refreshConnectionContextUsage) and
@@ -2757,7 +2756,6 @@ export class InteractiveMode {
 				latestToolCall.arguments,
 				{
 					showImages: this.settingsManager.getShowImages(),
-					imageWidthCells: this.settingsManager.getImageWidthCells(),
 				},
 				toolDefinition,
 				this.ui,
@@ -2972,6 +2970,9 @@ export class InteractiveMode {
 
 	private startFeatureHintPresentation(): void {
 		this.clearFeatureHintPresentation();
+		if (this.childAgentPanelMode) {
+			return;
+		}
 		if (this.featureHintEligibleAt === 0) {
 			this.featureHintEligibleAt = Date.now() + FEATURE_HINT_DELAY_MS;
 		}
@@ -3030,6 +3031,16 @@ export class InteractiveMode {
 		if (this.featureHintComponent) {
 			this.featureHintContainer.removeChild(this.featureHintComponent);
 			this.featureHintComponent = undefined;
+		}
+	}
+
+	private resumeFeatureHintPresentation(): void {
+		if (
+			this.loadingAnimation &&
+			this.shouldShowWorkingLoader() &&
+			this.statusContainer.children.includes(this.loadingAnimation)
+		) {
+			this.startFeatureHintPresentation();
 		}
 	}
 
@@ -3632,8 +3643,9 @@ export class InteractiveMode {
 			this.enteredSessionViaSubagentDetail = false;
 			this.childAgentDetail.setBackHintLabel("back to chat");
 			this.childAgentDetail.setNode(undefined);
+			this.childAgentPanelMode = undefined;
+			this.resumeFeatureHintPresentation();
 		}
-		this.childAgentPanelMode = undefined;
 		this.childAgentSummary.setHidden(false);
 
 		// Save text from current editor before switching
@@ -5288,6 +5300,7 @@ export class InteractiveMode {
 	private refreshChildAgentInspector(): void {
 		this.childAgentNodes = this.buildChildAgentInspectorNodes();
 		this.childAgentSummary.setNodes(this.childAgentNodes);
+		this.updateScopedHeartbeats();
 		this.updateWorkingPulse();
 		this.syncWorkingLoader();
 		this.updateWorkingLoaderMessage();
@@ -5324,6 +5337,7 @@ export class InteractiveMode {
 		this.childAgentSnapshots.clear();
 		this.childAgentNodes = [];
 		this.childAgentSummary.setNodes([]);
+		this.updateScopedHeartbeats();
 		this.childAgentSummary.setHidden(false);
 		this.childAgentDetail.setNode(undefined);
 		this.childAgentDetailNodeId = undefined;
@@ -5523,6 +5537,7 @@ export class InteractiveMode {
 			return false;
 		}
 		this.childAgentPanelMode = "detail";
+		this.clearFeatureHintPresentation();
 		this.childAgentDetailNodeId = nodeId;
 		this.childAgentDetail.setNode(node);
 		this.childAgentDetail.setBodyComponents([]);
@@ -5632,7 +5647,6 @@ export class InteractiveMode {
 				cwd: this.getCurrentCwd(),
 				toolOptions: {
 					showImages: this.settingsManager.getShowImages(),
-					imageWidthCells: this.settingsManager.getImageWidthCells(),
 				},
 				getToolDefinition: (name) => definitions.get(name),
 				markdownTheme: this.getMarkdownThemeWithSettings(),
@@ -5662,6 +5676,7 @@ export class InteractiveMode {
 		this.childAgentDetail.setBodyComponents([]);
 		this.childAgentSummary.setHidden(false);
 		this.restoreMainAgentView();
+		this.resumeFeatureHintPresentation();
 		// Restore the parent recap that was suppressed while the panel was open.
 		this.renderRecap();
 		// Re-render queued previews cleared on panel entry; the queue may still hold messages.
@@ -5996,9 +6011,7 @@ export class InteractiveMode {
 							content.arguments,
 							{
 								showImages: this.settingsManager.getShowImages(),
-								imageWidthCells: this.settingsManager.getImageWidthCells(),
-								// Do not replay historical inline image payloads on session load/rebuild.
-								allowInlineImages: false,
+								includeImageDimensions: false,
 							},
 							this.getCachedToolDefinition(content.name),
 							this.ui,
@@ -6042,8 +6055,7 @@ export class InteractiveMode {
 		}
 
 		for (const [toolCallId, component] of renderedPendingTools) {
-			// These tool calls have no historical result yet, so future updates are live output.
-			component.setAllowInlineImages(true);
+			component.setIncludeImageDimensions(true);
 			this.pendingTools.set(toolCallId, component);
 		}
 		this.ui.requestRender();
@@ -6899,7 +6911,6 @@ export class InteractiveMode {
 				{
 					autoCompact: state.autoCompactionEnabled,
 					showImages: this.settingsManager.getShowImages(),
-					imageWidthCells: this.settingsManager.getImageWidthCells(),
 					autoResizeImages: this.settingsManager.getImageAutoResize(),
 					blockImages: this.settingsManager.getBlockImages(),
 					enableSkillCommands: this.settingsManager.getEnableSkillCommands(),
@@ -6935,14 +6946,6 @@ export class InteractiveMode {
 						for (const child of this.chatContainer.children) {
 							if (child instanceof ToolExecutionComponent) {
 								child.setShowImages(enabled);
-							}
-						}
-					},
-					onImageWidthCellsChange: (width) => {
-						this.settingsManager.setImageWidthCells(width);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
-								child.setImageWidthCells(width);
 							}
 						}
 					},
@@ -7072,11 +7075,10 @@ export class InteractiveMode {
 		const model = await this.findExactModelMatch(searchTerm);
 		if (model) {
 			try {
-				this.showStatus(`Switching model: ${model.id}`);
-				await this.applySelectedModel(model);
-				this.showStatus(`Model: ${model.id}`);
-				void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
-				this.checkDaxnutsEasterEgg(model);
+				const authFlows = this.createAuthFlows();
+				const providerOptions = authFlows.getLoginProviderOptions();
+				if (!(await this.ensureModelProviderConfigured(model, authFlows, providerOptions))) return;
+				await this.completeModelSelection(model);
 			} catch (error) {
 				this.showError(error instanceof Error ? error.message : String(error));
 			}
@@ -7129,6 +7131,50 @@ export class InteractiveMode {
 		this.setupAutocompleteProvider();
 	}
 
+	private async completeModelSelection(model: AgentConnectionModel): Promise<void> {
+		this.showStatus(`Switching model: ${model.id}`);
+		await this.applySelectedModel(model);
+		this.showStatus(`Model: ${model.id}`);
+		void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
+		this.checkDaxnutsEasterEgg(model);
+	}
+
+	private async ensureModelProviderConfigured(
+		model: AgentConnectionModel,
+		authFlows: ProviderAuthFlows,
+		providerOptions: ReadonlyArray<AuthSelectorProvider>,
+	): Promise<boolean> {
+		if (this.isModelProviderConfigured(model)) return true;
+
+		const provider = providerOptions.find(
+			(option) => option.id === model.provider && (option.category ?? "provider") === "provider",
+		);
+		if (!provider) {
+			this.showError(`Authentication for ${model.provider} must be configured externally.`);
+			return false;
+		}
+
+		const result = await authFlows.loginProvider(provider);
+		if (result.status !== "success") return false;
+
+		this.invalidateConnectionModels();
+		await this.getConnectionAvailableModels();
+		if (this.isModelProviderConfigured(model)) return true;
+
+		this.showError(`Authentication completed, but ${model.provider} is still unavailable.`);
+		return false;
+	}
+
+	private isModelProviderConfigured(model: AgentConnectionModel): boolean {
+		return this.connectionConfiguredProviders.has(model.provider) || this.modelRegistry.hasConfiguredAuth(model);
+	}
+
+	private applyConnectionModelCatalog(catalog: AgentConnectionModelCatalog): void {
+		this.connectionModelCatalog = [...catalog.models];
+		this.connectionConfiguredProviders = new Set(catalog.configuredProviders);
+		this.connectionModels = catalog.models.filter((model) => this.connectionConfiguredProviders.has(model.provider));
+	}
+
 	private async getConnectionAvailableModels(): Promise<AgentConnectionModel[]> {
 		const inFlight = this.connectionModelsRefreshInFlight;
 		if (inFlight && inFlight.version === this.connectionModelsRefreshVersion) {
@@ -7136,14 +7182,13 @@ export class InteractiveMode {
 		}
 
 		const version = this.connectionModelsRefreshVersion;
-		const promise = this.agentConnection.getAvailableModels().then((models) => {
-			const nextModels = [...models];
+		const promise = this.agentConnection.getModelCatalog().then((catalog) => {
 			if (version !== this.connectionModelsRefreshVersion) {
 				return [...this.connectionModels];
 			}
-			this.connectionModels = nextModels;
+			this.applyConnectionModelCatalog(catalog);
 			this.connectionModelsFetchedAt = Date.now();
-			return nextModels;
+			return [...this.connectionModels];
 		});
 		this.connectionModelsRefreshInFlight = { version, promise };
 
@@ -7156,12 +7201,17 @@ export class InteractiveMode {
 		}
 	}
 
+	private async getConnectionModelCatalog(): Promise<AgentConnectionModel[]> {
+		await this.getConnectionAvailableModels();
+		return [...this.connectionModelCatalog];
+	}
+
 	private getCachedModelCandidates(): AgentConnectionModel[] {
 		const modelsById = new Map<string, AgentConnectionModel>();
 		for (const scoped of this.getScopedModelState()) {
 			modelsById.set(`${scoped.model.provider}/${scoped.model.id}`, scoped.model);
 		}
-		for (const model of this.connectionModels) {
+		for (const model of this.connectionModelCatalog) {
 			modelsById.set(`${model.provider}/${model.id}`, model);
 		}
 		return [...modelsById.values()];
@@ -7170,14 +7220,15 @@ export class InteractiveMode {
 	private getModelSelectorRefreshPromise(
 		options: { force?: boolean } = {},
 	): Promise<AgentConnectionModel[]> | undefined {
+		const refreshCatalog = () => this.getConnectionAvailableModels().then(() => this.getCachedModelCandidates());
 		if (this.connectionModelsRefreshInFlight) {
-			return this.getConnectionAvailableModels();
+			return refreshCatalog();
 		}
 		if (options.force || this.connectionModelsFetchedAt === 0) {
-			return this.getConnectionAvailableModels();
+			return refreshCatalog();
 		}
 		if (Date.now() - this.connectionModelsFetchedAt > MODEL_CATALOG_REFRESH_TTL_MS) {
-			return this.getConnectionAvailableModels();
+			return refreshCatalog();
 		}
 		return undefined;
 	}
@@ -7189,8 +7240,14 @@ export class InteractiveMode {
 
 	private invalidateConnectionModels(): void {
 		this.connectionModels = [];
+		this.connectionConfiguredProviders = new Set();
 		this.connectionModelsFetchedAt = 0;
 		this.invalidateConnectionModelRefresh();
+	}
+
+	private async refreshConnectionModelsAfterAuthChange(): Promise<void> {
+		this.invalidateConnectionModels();
+		await this.getConnectionAvailableModels();
 	}
 
 	private async getModelCandidates(): Promise<AgentConnectionModel[]> {
@@ -7369,7 +7426,7 @@ export class InteractiveMode {
 	}
 
 	private showConfigurationMenu(initialTab: ConfigurationMenuTab, initialModelSearch?: string): Promise<void> {
-		const availableModels = this.getCachedModelCandidates();
+		const modelCatalog = this.getCachedModelCandidates();
 		const authFlows = this.createAuthFlows();
 		const providerOptions = authFlows.getLoginProviderOptions();
 
@@ -7377,11 +7434,26 @@ export class InteractiveMode {
 			let handle: OverlayHandle | undefined;
 			let settled = false;
 			let hidden = false;
+			let removed = false;
 			let menu: ConfigurationMenuComponent;
 			const hide = () => {
-				if (hidden) return;
+				if (removed) return;
+				removed = true;
 				hidden = true;
 				handle?.hide();
+				this.ui.requestRender();
+			};
+			const conceal = () => {
+				if (hidden || removed) return;
+				hidden = true;
+				handle?.setHidden(true);
+				this.ui.requestRender();
+			};
+			const show = () => {
+				if (!hidden || removed || settled) return;
+				hidden = false;
+				handle?.setHidden(false);
+				handle?.focus();
 				this.ui.requestRender();
 			};
 			const finish = () => {
@@ -7395,7 +7467,7 @@ export class InteractiveMode {
 				if (!refreshPromise) return;
 				void refreshPromise
 					.then((models) => {
-						if (!settled) menu.updateModels(this.getCurrentModel(), models);
+						if (!settled) menu.updateModels(this.getCurrentModel(), models, this.connectionConfiguredProviders);
 					})
 					.catch((error) => {
 						if (!settled) this.showError(error instanceof Error ? error.message : String(error));
@@ -7423,7 +7495,11 @@ export class InteractiveMode {
 						}
 
 						await this.prepareForModelSelectionAfterLogin(authResult);
-						menu.updateModels(this.getCurrentModel());
+						menu.updateModels(
+							this.getCurrentModel(),
+							this.getCachedModelCandidates(),
+							this.connectionConfiguredProviders,
+						);
 						menu.setActiveTab("models");
 						refreshModels(true);
 					})
@@ -7441,7 +7517,8 @@ export class InteractiveMode {
 				modelRegistry: this.modelRegistry,
 				currentModel: this.getCurrentModel(),
 				scopedModels: this.getScopedModelState(),
-				availableModels,
+				availableModels: modelCatalog,
+				configuredProviders: this.connectionConfiguredProviders,
 				recentModels: this.settingsManager.getRecentModels(),
 				initialModelSearch,
 				getRows: () => this.ui.terminal.rows,
@@ -7449,16 +7526,28 @@ export class InteractiveMode {
 				onSelectProvider: (provider) => authenticate(provider, "providers"),
 				onSelectMcpConnection: (provider) => authenticate(provider, "mcp-connections"),
 				onSelectModel: (model) => {
-					hide();
-					this.showStatus(`Switching model: ${model.id}`);
-					void this.applySelectedModel(model)
-						.then(() => {
-							this.showStatus(`Model: ${model.id}`);
-							void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
-							this.checkDaxnutsEasterEgg(model);
-						})
-						.catch((error) => this.showError(error instanceof Error ? error.message : String(error)))
-						.finally(finish);
+					void (async () => {
+						let completed = false;
+						try {
+							const ready = await this.ensureModelProviderConfigured(model, authFlows, providerOptions);
+							handle?.focus();
+							menu.refreshAuthentication();
+							menu.updateModels(
+								this.getCurrentModel(),
+								this.getCachedModelCandidates(),
+								this.connectionConfiguredProviders,
+							);
+							if (!ready || settled) return;
+							conceal();
+							await this.completeModelSelection(model);
+							completed = true;
+						} catch (error) {
+							show();
+							this.showError(error instanceof Error ? error.message : String(error));
+						} finally {
+							if (completed) finish();
+						}
+					})();
 				},
 				onCancel: finish,
 			});
@@ -7470,7 +7559,7 @@ export class InteractiveMode {
 	private async showModelsSelector(): Promise<void> {
 		let allModels: AgentConnectionModel[];
 		try {
-			allModels = await this.getConnectionAvailableModels();
+			allModels = await this.getConnectionModelCatalog();
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 			return;
@@ -7901,6 +7990,7 @@ export class InteractiveMode {
 			showError: (message) => this.showError(message),
 			getAvailableModels: () => this.getConnectionAvailableModels(),
 			onAuthChanged: async () => {
+				await this.refreshConnectionModelsAfterAuthChange();
 				await this.updateAvailableProviderCount();
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
@@ -7912,10 +8002,6 @@ export class InteractiveMode {
 	}
 
 	private async prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean> {
-		if (authResult.status === "success" && authResult.kind !== "service") {
-			this.invalidateConnectionModels();
-		}
-
 		const currentModel = this.getCurrentModel();
 		// The agent core uses unknown/unknown as its no-model sentinel.
 		const selectedModel =
@@ -8951,7 +9037,7 @@ export class InteractiveMode {
 		if (updated.source === "heartbeat" && updated.activeSessionId === this.connectionState?.activeSessionId) {
 			this.patchConnectionState({ heartbeat: action === "stop" ? null : updated });
 		}
-		const remaining = this.heartbeats.filter((entry) => entry.job.id !== updated.id);
+		const remaining = this.heartbeatCatalog.filter((entry) => entry.job.id !== updated.id);
 		this.applyHeartbeatCatalog(
 			updated.status === "active" || updated.status === "paused"
 				? [...remaining, { ...heartbeat, job: updated }]

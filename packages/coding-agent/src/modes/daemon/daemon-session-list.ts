@@ -88,6 +88,17 @@ export function resolveAttachModelFallbackMessage(
 	return summary.model ? undefined : startupModelFallbackMessage;
 }
 
+export function isSessionSummaryBusy(summary: SessionSummary): boolean {
+	return (
+		summary.isStreaming ||
+		summary.isCompacting ||
+		summary.isRefining === true ||
+		summary.isBashRunning === true ||
+		summary.hasRunningRlmChildren === true ||
+		summary.pendingMessageCount > 0
+	);
+}
+
 export function buildSessionList(
 	activeSessions: readonly ActiveSessionState[],
 	savedSessions: readonly SessionInfo[],
