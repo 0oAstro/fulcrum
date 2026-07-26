@@ -275,6 +275,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		return this.configuredProviders?.has(item.provider) || this.modelRegistry.hasConfiguredAuth(item.model);
 	}
 
+	private getModelSearchText({ id, provider }: ModelItem): string {
+		const shortId = id.slice(id.lastIndexOf("/") + 1);
+		return `${shortId} ${id} ${provider} ${provider}/${id} ${provider} ${id}`;
+	}
+
 	private sortModels(models: ModelItem[]): ModelItem[] {
 		const sorted = [...models];
 		sorted.sort((a, b) => {
@@ -321,11 +326,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const queryChanged = query !== this.searchQuery;
 		this.searchQuery = query;
 		if (query.trim()) {
-			const scored = fuzzyFilterScored(
-				this.activeModels,
-				query,
-				({ id, provider }) => `${id} ${provider} ${provider}/${id} ${provider} ${id}`,
-			);
+			const scored = fuzzyFilterScored(this.activeModels, query, (item) => this.getModelSearchText(item));
 			scored.sort(
 				(a, b) =>
 					a.score - b.score ||

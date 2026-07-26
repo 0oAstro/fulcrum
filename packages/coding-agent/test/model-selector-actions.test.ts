@@ -229,6 +229,41 @@ describe("ModelSelectorComponent", () => {
 		expect(row51).toBeLessThan(row5);
 	});
 
+	it("uses configured providers to break ties without outranking better fuzzy matches", async () => {
+		const harness = await createHarness({
+			models: [{ id: "base", name: "Base", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("base")!;
+		const authenticatedExact = { ...base, provider: "prime-inference", id: "z-ai/glm-5.2" };
+		const authenticatedFuzzy = { ...base, provider: "prime-inference", id: "google/gemini-2.5-flash" };
+		const unauthenticatedExact = { ...base, provider: "opencode", id: "glm-5.2" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			"glm5.2",
+			{
+				availableModels: [authenticatedFuzzy, unauthenticatedExact, authenticatedExact],
+				configuredProviders: new Set([authenticatedExact.provider]),
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(120).join("\n")).split("\n");
+		const authenticatedExactRow = lines.findIndex((line) => line.includes("z-ai/glm-5.2"));
+		const unauthenticatedExactRow = lines.findIndex((line) => line.includes("glm-5.2") && line.includes("sign in"));
+		const authenticatedFuzzyRow = lines.findIndex((line) => line.includes("google/gemini-2.5-flash"));
+		expect(authenticatedExactRow).toBeGreaterThanOrEqual(0);
+		expect(authenticatedExactRow).toBeLessThan(unauthenticatedExactRow);
+		expect(unauthenticatedExactRow).toBeLessThan(authenticatedFuzzyRow);
+	});
+
 	it("treats a whitespace-only query as no search and keeps the current model first", async () => {
 		const harness = await createHarness({
 			models: [
