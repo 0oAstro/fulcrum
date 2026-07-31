@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -498,6 +498,43 @@ dependencies = ["httpx"]
 		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
 
 		await expect(ensureKernelPython()).resolves.toBe(overridePython);
+	});
+
+	it("kills an override probe that ignores SIGTERM when bootstrap is aborted", async () => {
+		const overridePython = join(tempDir, "override-python");
+		const pidFile = join(tempDir, "override-python.pid");
+		writeExecutable(
+			overridePython,
+			[
+				"#!/usr/bin/env node",
+				'import { writeFileSync } from "node:fs";',
+				`writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+				'process.on("SIGTERM", () => {});',
+				"setInterval(() => {}, 1000);",
+				"",
+			].join("\n"),
+		);
+		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
+		const controller = new AbortController();
+		let childPid: number | undefined;
+
+		try {
+			const bootstrap = ensureKernelPython({ signal: controller.signal });
+			await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true));
+			childPid = Number.parseInt(readFileSync(pidFile, "utf8"), 10);
+			controller.abort();
+
+			await expect(bootstrap).rejects.toThrow("Python kernel bootstrap aborted");
+			expect(() => process.kill(childPid!, 0)).toThrow();
+		} finally {
+			if (childPid !== undefined) {
+				try {
+					process.kill(childPid, "SIGKILL");
+				} catch {
+					// The expected path already killed the probe.
+				}
+			}
+		}
 	});
 
 	it("allows PRIME_AGENT_KERNEL_PYTHON missing Python skill imports", async () => {
