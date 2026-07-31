@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed `/tree` overflowing the daemon serializer on very deep sessions by transferring a flat session tree.
+- Fixed IPython startup hangs by bounding kernel bootstrap, cleaning failed startup state, and logging lock-holder diagnostics.
 
 - Added starting a new session directly from the agents view with `ctrl+n`.
 - Added queueing a reply as a follow-up with `alt+enter` in the agents-view reply composer; plain Enter now steers a streaming agent.

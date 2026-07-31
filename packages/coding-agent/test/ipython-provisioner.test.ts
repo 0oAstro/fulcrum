@@ -187,6 +187,40 @@ describe("IpythonKernelProvisioner", () => {
 		expect(countRuns()).toBe(1);
 	});
 
+	it("bounds a startup blocked on readyGate and clears the startup cache", async () => {
+		const previousTimeout = process.env.PRIME_AGENT_KERNEL_START_TIMEOUT_MS;
+		process.env.PRIME_AGENT_KERNEL_START_TIMEOUT_MS = "20";
+		try {
+			const { python } = writeFakePython();
+			const gate = new Promise<void>(() => {});
+			const provisioner = new IpythonKernelProvisioner(tempDir, { python, readyGate: gate });
+
+			await expect(provisioner.ensure()).rejects.toThrow(/startup timed out after 20ms at stage "ready gate"/);
+			expect(provisioner.hasStartupInFlight).toBe(false);
+		} finally {
+			if (previousTimeout === undefined) delete process.env.PRIME_AGENT_KERNEL_START_TIMEOUT_MS;
+			else process.env.PRIME_AGENT_KERNEL_START_TIMEOUT_MS = previousTimeout;
+		}
+	});
+
+	it("surfaces a backgrounded startup failure on the next ensure", async () => {
+		const previousTimeout = process.env.PRIME_AGENT_KERNEL_START_TIMEOUT_MS;
+		process.env.PRIME_AGENT_KERNEL_START_TIMEOUT_MS = "20";
+		try {
+			const { python } = writeFakePython();
+			const gate = new Promise<void>(() => {});
+			const provisioner = new IpythonKernelProvisioner(tempDir, { python, readyGate: gate });
+			const startup = provisioner.ensure();
+			provisioner.markStartupBackgrounded();
+
+			await expect(startup).rejects.toThrow(/startup timed out after 20ms/);
+			await expect(provisioner.ensure()).rejects.toThrow(/startup timed out after 20ms/);
+		} finally {
+			if (previousTimeout === undefined) delete process.env.PRIME_AGENT_KERNEL_START_TIMEOUT_MS;
+			else process.env.PRIME_AGENT_KERNEL_START_TIMEOUT_MS = previousTimeout;
+		}
+	});
+
 	it("listNamespaceNames() returns null when no kernel is running", async () => {
 		const provisioner = new IpythonKernelProvisioner(tempDir, {});
 		expect(await provisioner.listNamespaceNames()).toBeNull();
