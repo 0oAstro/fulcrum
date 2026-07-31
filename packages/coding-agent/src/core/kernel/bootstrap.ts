@@ -382,7 +382,12 @@ function run(
 	options: { stdio?: "ignore" | "inherit"; signal?: AbortSignal } = {},
 ): Promise<void> {
 	return new Promise((resolve, reject) => {
+		if (options.signal?.aborted) {
+			reject(createBootstrapAbortError());
+			return;
+		}
 		let settled = false;
+		let aborted = false;
 		let killTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 		const finish = (error?: Error): void => {
 			if (settled) return;
@@ -393,7 +398,8 @@ function run(
 			else resolve();
 		};
 		const onAbort = (): void => {
-			const error = createBootstrapAbortError();
+			if (settled || aborted) return;
+			aborted = true;
 			try {
 				child.kill("SIGTERM");
 			} catch {
@@ -407,19 +413,19 @@ function run(
 				}
 			}, 1000);
 			if (killTimer && typeof killTimer === "object" && "unref" in killTimer) killTimer.unref();
-			finish(error);
 		};
-		if (options.signal?.aborted) {
-			finish(createBootstrapAbortError());
-			return;
-		}
 		const child = spawn(command, args, {
 			env: process.env,
 			stdio: options.stdio ?? "ignore",
 		});
 		options.signal?.addEventListener("abort", onAbort, { once: true });
-		child.on("error", (error) => finish(error));
+		if (options.signal?.aborted) onAbort();
+		child.on("error", (error) => finish(aborted ? createBootstrapAbortError() : error));
 		child.on("exit", (code, signal) => {
+			if (aborted) {
+				finish(createBootstrapAbortError());
+				return;
+			}
 			if (code === 0) {
 				finish();
 				return;

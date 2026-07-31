@@ -593,11 +593,7 @@ export class IpythonKernelProvisioner {
 						timedOut = true;
 						timeoutController.abort();
 						reject(
-							new Error(
-								`IPython kernel startup timed out after ${timeoutMs}ms at stage "${
-									manager?.startupDiagnostics.stage ?? this.startupStage
-								}"`,
-							),
+							new Error(`IPython kernel startup timed out after ${timeoutMs}ms at stage "${this.startupStage}"`),
 						);
 					}, timeoutMs);
 					if (timeout && typeof timeout === "object" && "unref" in timeout) timeout.unref();
@@ -608,10 +604,9 @@ export class IpythonKernelProvisioner {
 		} catch (error) {
 			if (timedOut) {
 				const diagnostics = manager?.startupDiagnostics;
-				const stage = diagnostics?.stage ?? this.startupStage;
 				const stderr = diagnostics?.stderr.trim() || "(empty)";
 				const timeoutError = new Error(
-					`IPython kernel startup timed out after ${timeoutMs}ms at stage "${stage}". Kernel stderr:\n${stderr}`,
+					`IPython kernel startup timed out after ${timeoutMs}ms at stage "${this.startupStage}". Kernel stderr:\n${stderr}`,
 				);
 				if (this.startupWasBackgrounded) {
 					this.lastStartupFailure = timeoutError;
