@@ -170,6 +170,50 @@ function snapshotFrames(messages: AgentMessage[]) {
 }
 
 describe("ENG-4602 snapshot transfer containment", () => {
+	it("keeps a snapshot load coalesced until its asynchronous transfer ends", async () => {
+		const supervisor = new DaemonSupervisor("/tmp/eng-4602-supervisor-load.sock", {
+			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+			descriptorDir: "/tmp/eng-4602-supervisor-load-state",
+		});
+		const { request, worker } = workerHarness();
+		request.mockImplementation(async (command: { type: string }) => {
+			if (command.type === "attach") return { success: true, data: streamedResult([]) };
+			throw new Error(`unexpected command: ${command.type}`);
+		});
+		const client = socketClient("public", new PassThrough());
+		const internals = supervisor as unknown as {
+			workers: Map<string, WorkerHarness>;
+			syncWorkerExtensionUi: ReturnType<typeof vi.fn>;
+			attachClient(
+				client: DaemonSocketClient,
+				command: Extract<DaemonCommand, { type: "attach" }>,
+			): Promise<unknown>;
+			handleWorkerFrame(worker: WorkerHarness, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
+		};
+		internals.workers.set(worker.descriptor.workerId, worker);
+		internals.syncWorkerExtensionUi = vi.fn(async () => {});
+		const command = {
+			type: "attach" as const,
+			activeSessionId,
+			capabilities: ["chunked_snapshot" as const],
+		};
+
+		await internals.attachClient(client, command);
+		worker.snapshotCache.delete(activeSessionId);
+		await internals.attachClient(client, command);
+
+		expect(request).toHaveBeenCalledOnce();
+		expect(worker.snapshotLoads.size).toBe(1);
+
+		const frames = snapshotFrames([{ role: "user", content: "stable", timestamp: 1 }]);
+		for (const message of [frames.begin, frames.chunk, frames.end]) {
+			internals.handleWorkerFrame(worker, frame(message));
+		}
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		expect(worker.snapshotLoads.size).toBe(0);
+	});
+
 	it("observes the deferred attach snapshot promise", async () => {
 		const daemon = new AgentDaemon("/tmp/eng-4602-worker.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },

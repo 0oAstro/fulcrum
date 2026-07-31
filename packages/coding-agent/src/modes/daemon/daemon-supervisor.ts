@@ -2861,10 +2861,16 @@ export class DaemonSupervisor {
 					});
 					const loaded = attachResultFromResponse(response);
 					return this.cacheLoadedSnapshot(match.worker, activeSessionId, loaded, observedSnapshotId);
-				})().finally(() => {
-					match.worker.snapshotLoads.delete(snapshotLoadKey);
-				});
+				})();
 				match.worker.snapshotLoads.set(snapshotLoadKey, loading);
+				void loading.then(
+					(loaded) => this.releaseSnapshotLoadAfterTransfer(match.worker, snapshotLoadKey, loading!, loaded),
+					() => {
+						if (match.worker.snapshotLoads.get(snapshotLoadKey) === loading) {
+							match.worker.snapshotLoads.delete(snapshotLoadKey);
+						}
+					},
+				);
 			}
 			result = await loading;
 		}
@@ -2922,6 +2928,32 @@ export class DaemonSupervisor {
 				client.attachedActiveSessionIds.delete(activeSessionId);
 			}
 			throw error;
+		}
+	}
+
+	private async releaseSnapshotLoadAfterTransfer(
+		worker: ResidentWorker,
+		snapshotLoadKey: string,
+		loading: Promise<DaemonAttachResult>,
+		result: DaemonAttachResult,
+	): Promise<void> {
+		try {
+			const snapshotId = result.snapshotStream?.id;
+			const transcript = snapshotId
+				? this.snapshotGeneration(worker, result.activeSessionId, snapshotId)?.transcript
+				: undefined;
+			if (transcript && !transcript.complete) {
+				let chunkIndex = 0;
+				while (await transcript.waitForChunk(chunkIndex)) {
+					chunkIndex++;
+				}
+			}
+		} catch {
+			// A failed transfer releases the load so recovery can request a fresh snapshot.
+		} finally {
+			if (worker.snapshotLoads.get(snapshotLoadKey) === loading) {
+				worker.snapshotLoads.delete(snapshotLoadKey);
+			}
 		}
 	}
 
