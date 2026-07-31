@@ -23,9 +23,18 @@ export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 export const REFINE_SKILL_NAME = "refine";
 const HARNESS_STATE_DIR_NAME = "harness";
 const REFINEMENT_HISTORY_FILE_NAME = "refinements.jsonl";
-const DEFAULT_OVERVIEW_ENTRY_LIMIT = 6;
-const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
-const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
+function overviewLimit(name: string, fallback: number): number {
+	const raw = process.env[name];
+	if (raw === undefined) {
+		return fallback;
+	}
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const DEFAULT_OVERVIEW_ENTRY_LIMIT = overviewLimit("PRIME_AGENT_HARNESS_OVERVIEW_ENTRY_LIMIT", 6);
+const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = overviewLimit("PRIME_AGENT_HARNESS_OVERVIEW_REFINEMENT_LIMIT", 5);
+const DEFAULT_OVERVIEW_CONTENT_LIMIT = overviewLimit("PRIME_AGENT_HARNESS_OVERVIEW_CONTENT_LIMIT", 180);
 
 export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
