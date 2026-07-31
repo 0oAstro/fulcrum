@@ -92,6 +92,8 @@ export interface KernelManagerOptions {
 
 export interface KernelStartOptions {
 	onBootstrapProgress?: KernelBootstrapProgressHandler;
+	/** Cancels the shared startup attempt itself; `signal` only cancels this caller's wait. */
+	startupSignal?: AbortSignal;
 	signal?: AbortSignal;
 }
 
@@ -528,6 +530,7 @@ export class KernelManager {
 	private connection?: ConnectionInfo;
 	private tempDir?: string;
 	private kernelStderr = "";
+	private startupStage = "idle";
 	/** Serializes execute() calls — Jupyter shell channel is request/reply. */
 	private executionQueue: Promise<unknown> = Promise.resolve();
 	private activeExecution?: ActiveExecution;
@@ -561,21 +564,35 @@ export class KernelManager {
 		return this.options.sessionId;
 	}
 
+	get startupDiagnostics(): { stage: string; stderr: string } {
+		return { stage: this.startupStage, stderr: this.kernelStderr.slice(-4096) };
+	}
+
 	private appendKernelDiagnostic(message: string): void {
 		this.kernelStderr += `[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`;
 	}
 
+	reportStartupStage(stage: string, onBootstrapProgress?: KernelBootstrapProgressHandler): void {
+		this.startupStage = stage;
+		this.appendKernelDiagnostic(`startup stage: ${stage}`);
+		process.stderr.write(`[prime-agent kernel] startup stage: ${stage}\n`);
+		onBootstrapProgress?.(`IPython kernel startup: ${stage}`);
+	}
+
 	async start(options: KernelStartOptions = {}): Promise<void> {
-		if (options.signal?.aborted) {
+		if (options.signal?.aborted || options.startupSignal?.aborted) {
 			throw createKernelStartupAbortError();
 		}
 		if (!this.startPromise) {
-			this.startPromise = this.doStart({ onBootstrapProgress: options.onBootstrapProgress }).catch((error) => {
+			this.startPromise = this.doStart({
+				onBootstrapProgress: options.onBootstrapProgress,
+				signal: options.startupSignal,
+			}).catch((error) => {
 				this.startPromise = undefined;
 				throw error;
 			});
 		}
-		return raceStartupWithAbort(this.startPromise, options.signal);
+		return raceStartupWithAbort(this.startPromise, options.signal ?? options.startupSignal);
 	}
 
 	private async doStart(startOptions: KernelStartOptions): Promise<void> {
@@ -588,13 +605,19 @@ export class KernelManager {
 
 		let python: string;
 		try {
+			this.reportStartupStage("bootstrap start", startOptions.onBootstrapProgress);
 			python =
 				this.options.python ??
 				(await ensureKernelPython({
 					pythonSkills: this.options.pythonSkills,
-					onProgress: startOptions.onBootstrapProgress,
+					onProgress: (message) => {
+						this.appendKernelDiagnostic(message);
+						startOptions.onBootstrapProgress?.(message);
+					},
+					signal: startOptions.signal,
 				}));
 			this.options.python = python;
+			this.reportStartupStage("bootstrap done", startOptions.onBootstrapProgress);
 		} catch (error) {
 			liveKernels.delete(this);
 			if ((this.state as string) !== "shutdown") this.state = "idle";
@@ -623,6 +646,7 @@ export class KernelManager {
 					env: this.options.env ? { ...process.env, ...this.options.env } : { ...process.env },
 				});
 				forked = true;
+				this.reportStartupStage(`spawn pid=${this.kernelPid}`, startOptions.onBootstrapProgress);
 			} catch (err) {
 				if (!(err instanceof ForkServerUnavailable)) throw err;
 				this.appendKernelDiagnostic(`forkserver unavailable, spawning directly: ${err.message}`);
@@ -648,6 +672,7 @@ export class KernelManager {
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			this.kernel = kernel;
+			this.reportStartupStage(`spawn pid=${kernel.pid ?? "unknown"}`, startOptions.onBootstrapProgress);
 
 			kernel.stderr?.on("data", (buf: Buffer) => {
 				const s = buf.toString();
@@ -707,6 +732,7 @@ export class KernelManager {
 		}
 
 		this.state = "running";
+		this.reportStartupStage("ready", startOptions.onBootstrapProgress);
 		this.startForkedLivenessMonitor();
 	}
 

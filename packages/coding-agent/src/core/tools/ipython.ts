@@ -331,6 +331,9 @@ export class IpythonKernelProvisioner {
 	private startedManager?: KernelManager;
 	private readonly startupListeners = new Set<KernelBootstrapProgressHandler>();
 	private lastStartupMessage?: string;
+	private startupStage = "idle";
+	private lastStartupFailure?: Error;
+	private startupWasBackgrounded = false;
 	private _lastRestore?: RestoreResult;
 	private readonly disposeController = new AbortController();
 
@@ -363,6 +366,18 @@ export class IpythonKernelProvisioner {
 		return this.startedManager?.isRunning ?? false;
 	}
 
+	/** Whether the provisioner is still creating or starting its kernel. */
+	get hasStartupInFlight(): boolean {
+		return Boolean(this.managerPromise && !this.startedManager);
+	}
+
+	/** Mark a detached tool call so a later startup failure is surfaced to the next call. */
+	markStartupBackgrounded(): void {
+		if (this.hasStartupInFlight) {
+			this.startupWasBackgrounded = true;
+		}
+	}
+
 	/** Live user-defined names in the kernel namespace, or null if listing failed / no kernel. */
 	async listNamespaceNames(signal?: AbortSignal): Promise<string[] | null> {
 		const m = this.startedManager ?? (await this.managerPromise?.catch(() => undefined));
@@ -375,6 +390,8 @@ export class IpythonKernelProvisioner {
 		// in-flight startKernel before it spawns, so a disposed session's boot
 		// doesn't waste a slot during a fan-out.
 		this.disposeController.abort();
+		this.startupWasBackgrounded = false;
+		this.lastStartupFailure = undefined;
 		const pending = this.managerPromise;
 		this.managerPromise = undefined;
 		this.startedManager = undefined;
@@ -391,6 +408,8 @@ export class IpythonKernelProvisioner {
 	}
 
 	async kill(): Promise<void> {
+		this.startupWasBackgrounded = false;
+		this.lastStartupFailure = undefined;
 		const pending = this.managerPromise;
 		this.managerPromise = undefined;
 		this.startedManager = undefined;
@@ -409,6 +428,11 @@ export class IpythonKernelProvisioner {
 	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelManager> {
 		if (signal?.aborted) {
 			return Promise.reject(createAbortError());
+		}
+		if (this.lastStartupFailure) {
+			const failure = this.lastStartupFailure;
+			this.lastStartupFailure = undefined;
+			return Promise.reject(failure);
 		}
 		let cleanupProgressListener: (() => void) | undefined;
 		if (onProgress && !this.startedManager) {
@@ -433,12 +457,16 @@ export class IpythonKernelProvisioner {
 					}
 					this.settleStartup();
 				},
-				() => {
+				(error: unknown) => {
 					// Clear the memo so the next ensure() retries instead of
 					// rethrowing a cached rejection forever.
 					if (this.managerPromise === startup) {
 						this.managerPromise = undefined;
 					}
+					if (this.startupWasBackgrounded) {
+						this.lastStartupFailure = error instanceof Error ? error : new Error(String(error));
+					}
+					this.startupWasBackgrounded = false;
 					this.settleStartup();
 				},
 			);
@@ -455,20 +483,35 @@ export class IpythonKernelProvisioner {
 
 	private emitStartupProgress(message: string): void {
 		this.lastStartupMessage = message;
+		this.startupStage = message;
 		for (const listener of [...this.startupListeners]) {
 			listener(message);
 		}
 	}
 
+	private clearStartupCache(): void {
+		this.managerPromise = undefined;
+		this.startedManager = undefined;
+		if (this.options?.kernelManagerRef) {
+			this.options.kernelManagerRef.current = undefined;
+		}
+	}
+
 	private async startKernel(signal?: AbortSignal): Promise<KernelManager> {
-		const startupAbort = createLinkedAbortSignal([this.disposeController.signal, signal]);
+		const timeoutMs = kernelStartTimeoutMs();
+		const timeoutController = new AbortController();
+		const startupAbort = createLinkedAbortSignal([this.disposeController.signal, signal, timeoutController.signal]);
 		const startupSignal = startupAbort.signal;
+		let manager: KernelManager | undefined;
+		let timedOut = false;
+		let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
 		// Wait for a previous provisioner (e.g. on /reload) to finish disposing — and
 		// flushing its final snapshot — before we read that snapshot back, so the two
 		// kernels can't race over the same on-disk file. Guarded so the common
 		// no-gate path stays synchronous (callers rely on prompt startup progress).
-		try {
+		const attempt = (async (): Promise<KernelManager> => {
 			if (this.options?.readyGate) {
+				this.startupStage = "ready gate";
 				await raceWithAbort(
 					this.options.readyGate.catch(() => {}),
 					startupSignal,
@@ -487,6 +530,7 @@ export class IpythonKernelProvisioner {
 					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
 					: undefined,
 			});
+			manager = m;
 			let pendingRestore: RestoreResult | undefined;
 			try {
 				// Emitted synchronously (before the permit await) so a listener attaching
@@ -500,8 +544,10 @@ export class IpythonKernelProvisioner {
 				await withKernelBootPermit(() => {
 					// Disposed while queued for the permit — don't spawn a kernel nobody wants.
 					if (startupSignal.aborted) throw new Error("Kernel provisioner disposed before start");
+					m.reportStartupStage("permit acquired", (message) => this.emitStartupProgress(message));
 					return m.start({
 						onBootstrapProgress: (message) => this.emitStartupProgress(message),
+						startupSignal,
 						signal: startupSignal,
 					});
 				}, startupSignal);
@@ -538,7 +584,47 @@ export class IpythonKernelProvisioner {
 				this.options.kernelManagerRef.current = m;
 			}
 			return m;
+		})();
+
+		try {
+			if (timeoutMs > 0) {
+				const deadline = new Promise<KernelManager>((_, reject) => {
+					timeout = globalThis.setTimeout(() => {
+						timedOut = true;
+						timeoutController.abort();
+						reject(
+							new Error(
+								`IPython kernel startup timed out after ${timeoutMs}ms at stage "${
+									manager?.startupDiagnostics.stage ?? this.startupStage
+								}"`,
+							),
+						);
+					}, timeoutMs);
+					if (timeout && typeof timeout === "object" && "unref" in timeout) timeout.unref();
+				});
+				return await Promise.race([attempt, deadline]);
+			}
+			return await attempt;
+		} catch (error) {
+			if (timedOut) {
+				const diagnostics = manager?.startupDiagnostics;
+				const stage = diagnostics?.stage ?? this.startupStage;
+				const stderr = diagnostics?.stderr.trim() || "(empty)";
+				const timeoutError = new Error(
+					`IPython kernel startup timed out after ${timeoutMs}ms at stage "${stage}". Kernel stderr:\n${stderr}`,
+				);
+				if (this.startupWasBackgrounded) {
+					this.lastStartupFailure = timeoutError;
+					this.startupWasBackgrounded = false;
+				}
+				this.clearStartupCache();
+				void attempt.catch(() => undefined);
+				if (manager) await manager.dispose().catch(() => undefined);
+				throw timeoutError;
+			}
+			throw error;
 		} finally {
+			if (timeout) globalThis.clearTimeout(timeout);
 			startupAbort.cleanup();
 		}
 	}
@@ -570,6 +656,15 @@ function ipythonToolTimeoutMs(): number {
 	}
 	const parsed = Number.parseInt(raw, 10);
 	return Number.isFinite(parsed) && parsed >= 0 ? parsed : 900_000;
+}
+
+function kernelStartTimeoutMs(): number {
+	const raw = process.env.PRIME_AGENT_KERNEL_START_TIMEOUT_MS;
+	if (raw === undefined) {
+		return 180_000;
+	}
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : 180_000;
 }
 
 function backgroundedNotice(timeoutMs: number, outputSoFar: string): string {
@@ -709,6 +804,7 @@ export function createIpythonToolDefinition(
 					// ipython call wait behind it, which doubles as the poll mechanism.
 					// Late completion is intentionally not delivered as a message — the
 					// kernel namespace carries the results forward.
+					provisioner.markStartupBackgrounded();
 					executePromise.catch(() => undefined);
 					return {
 						content: [{ type: "text", text: backgroundedNotice(timeoutMs, streamedOutput) }],

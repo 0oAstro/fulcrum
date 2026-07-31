@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed IPython startup hangs by bounding kernel bootstrap, cleaning failed startup state, and logging lock-holder diagnostics.
+
 ## [0.5.0] - 2026-08-03
 
 ### Breaking Changes
