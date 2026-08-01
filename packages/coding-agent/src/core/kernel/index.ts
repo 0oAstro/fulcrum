@@ -47,16 +47,47 @@ const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
 const EXECUTE_REPLY_IDLE_GRACE_MS = 2000;
 // Liveness probe over the control channel when reconciling a backgrounded cell.
 const CONTROL_PROBE_TIMEOUT_MS = 5000;
+// Auto-interrupt escalation for a stuck cell. The execution-queue barrier in
+// enqueueExecute means queued calls can never reach the ordinary busy-kernel
+// recovery, so reconciliation is the only code that runs while a cell wedges
+// the queue: after this many consecutive backgrounded reconciles of the same
+// execution with no new output, interrupt it so the queue can drain.
+const STUCK_CELL_INTERRUPT_AFTER_SILENT_POLLS = 3;
+// Auto-interrupts tolerated before reporting the kernel as wedged (a cell in a
+// C extension holding the GIL never sees SIGINT).
+const STUCK_CELL_MAX_INTERRUPT_ATTEMPTS = 2;
+// How long an auto-interrupt may take to clear the stuck execution.
+const STUCK_CELL_INTERRUPT_GRACE_MS = 10_000;
 const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
 const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE =
 	"IPython kernel is still running the previously interrupted cell. Wait and try again, or kill the IPython kernel to start fresh.";
+
+function stuckCellInterruptAfterSilentPolls(): number {
+	const raw = process.env.PRIME_AGENT_IPYTHON_STUCK_CELL_POLLS;
+	if (raw === undefined || raw === "") {
+		return STUCK_CELL_INTERRUPT_AFTER_SILENT_POLLS;
+	}
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed >= 1 ? parsed : STUCK_CELL_INTERRUPT_AFTER_SILENT_POLLS;
+}
+
+function stuckCellInterruptGraceMs(): number {
+	const raw = process.env.PRIME_AGENT_IPYTHON_STUCK_CELL_GRACE_MS;
+	if (raw === undefined || raw === "") {
+		return STUCK_CELL_INTERRUPT_GRACE_MS;
+	}
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : STUCK_CELL_INTERRUPT_GRACE_MS;
+}
 
 /** What reconciling a backgrounded cell against actual kernel state found. */
 export type KernelReconcileOutcome =
 	| "no-active-execution"
 	| "flushed-after-reply"
 	| "kernel-responsive"
-	| "kernel-unresponsive";
+	| "kernel-unresponsive"
+	| "auto-interrupted"
+	| "kernel-wedged";
 
 export class KernelBusyAfterInterruptError extends Error {
 	constructor() {
@@ -335,6 +366,12 @@ interface ActiveExecution {
 	gotExecuteReply: boolean;
 	/** Bounded wait for the IOPub idle after execute_reply; finishes the execution if idle never lands. */
 	idleGraceTimer?: ReturnType<typeof globalThis.setTimeout>;
+	/** Consecutive backgrounded reconciles that saw no new output (auto-interrupt escalation). */
+	silentReconcilePolls?: number;
+	/** Output size observed by the last backgrounded reconcile. */
+	reconcileOutputChars?: number;
+	/** Auto-interrupts already sent to this execution by reconciliation. */
+	autoInterruptAttempts?: number;
 	resolve: (result: ExecuteResult) => void;
 	reject: (error: Error) => void;
 }
@@ -1447,6 +1484,49 @@ export class KernelManager {
 				`reconcile: kernel did not answer a control-channel probe within ${probeTimeoutMs}ms`,
 			);
 			return "kernel-unresponsive";
+		}
+		return await this.escalateStuckExecution(execution);
+	}
+
+	/**
+	 * A kernel-responsive reconcile means the cell (or one ahead of it) really
+	 * is still running. A cell that keeps running across repeated reconciles
+	 * while producing no output is treated as stuck (observed live: a top-level
+	 * `await` on a network future that never resolves — the control channel
+	 * answers from its own thread while do_execute awaits forever, and the
+	 * queue barrier keeps every follow-up call from reaching busy recovery).
+	 * Escalation: interrupt it so the queue drains; report `kernel-wedged`
+	 * once interrupts have provably not worked so the tool can restart.
+	 */
+	private async escalateStuckExecution(execution: ActiveExecution): Promise<KernelReconcileOutcome> {
+		const outputChars = execution.stdout.length + execution.stderr.length;
+		if (outputChars > (execution.reconcileOutputChars ?? 0)) {
+			execution.reconcileOutputChars = outputChars;
+			execution.silentReconcilePolls = 0;
+			return "kernel-responsive";
+		}
+		execution.reconcileOutputChars = outputChars;
+		execution.silentReconcilePolls = (execution.silentReconcilePolls ?? 0) + 1;
+		if (execution.silentReconcilePolls < stuckCellInterruptAfterSilentPolls()) {
+			return "kernel-responsive";
+		}
+		if ((execution.autoInterruptAttempts ?? 0) >= STUCK_CELL_MAX_INTERRUPT_ATTEMPTS) {
+			this.appendKernelDiagnostic(
+				`reconcile: execution ${execution.requestMsgId} survived ` +
+					`${execution.autoInterruptAttempts} auto-interrupts; reporting the kernel as wedged`,
+			);
+			return "kernel-wedged";
+		}
+		execution.autoInterruptAttempts = (execution.autoInterruptAttempts ?? 0) + 1;
+		this.appendKernelDiagnostic(
+			`reconcile: auto-interrupting execution ${execution.requestMsgId} after ` +
+				`${execution.silentReconcilePolls} silent polls ` +
+				`(attempt ${execution.autoInterruptAttempts}/${STUCK_CELL_MAX_INTERRUPT_ATTEMPTS})`,
+		);
+		await this.interrupt().catch(() => undefined);
+		const cleared = await this.waitForActiveExecutionToClear(undefined, stuckCellInterruptGraceMs());
+		if (cleared || this.activeExecution !== execution) {
+			return "auto-interrupted";
 		}
 		return "kernel-responsive";
 	}
