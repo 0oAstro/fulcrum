@@ -14,6 +14,7 @@ import {
 	KernelBusyAfterInterruptError,
 	type KernelDiffDisplay,
 	KernelManager,
+	type KernelReconcileOutcome,
 	type KernelSentAgentMessage,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
@@ -260,6 +261,8 @@ export interface IpythonToolDetails {
 	sentAgentMessages?: KernelSentAgentMessage[];
 	/** True when this result came after killing and restarting a busy kernel. */
 	kernelRestarted?: boolean;
+	/** What reconciling a backgrounded cell against actual kernel state found. */
+	reconcileOutcome?: KernelReconcileOutcome | "no-kernel";
 	error?: {
 		ename: string;
 		evalue: string;
@@ -376,6 +379,18 @@ export class IpythonKernelProvisioner {
 		if (this.hasStartupInFlight) {
 			this.startupWasBackgrounded = true;
 		}
+	}
+
+	/**
+	 * Reconcile a cell the tool-level timeout just backgrounded against actual
+	 * kernel state; see KernelManager.reconcileBackgroundedExecution.
+	 */
+	async reconcileBackgroundedExecution(probeTimeoutMs?: number): Promise<KernelReconcileOutcome | "no-kernel"> {
+		const m = this.startedManager;
+		if (!m?.isRunning) {
+			return "no-kernel";
+		}
+		return m.reconcileBackgroundedExecution(probeTimeoutMs);
 	}
 
 	/** Live user-defined names in the kernel namespace, or null if listing failed / no kernel. */
@@ -662,7 +677,11 @@ function kernelStartTimeoutMs(): number {
 	return Number.isFinite(parsed) && parsed >= 0 ? parsed : 180_000;
 }
 
-function backgroundedNotice(timeoutMs: number, outputSoFar: string): string {
+function backgroundedNotice(
+	timeoutMs: number,
+	outputSoFar: string,
+	reconcileOutcome?: KernelReconcileOutcome | "no-kernel",
+): string {
 	const head =
 		`Cell still executing after ${Math.round(timeoutMs / 1000)}s; it continues in the background. ` +
 		"The kernel runs cells serially, so your next ipython call waits for this cell to finish " +
@@ -670,7 +689,23 @@ function backgroundedNotice(timeoutMs: number, outputSoFar: string): string {
 		"stay in the kernel; after it finishes, inspect them with a cheap follow-up cell. If you " +
 		"believe the cell is stuck rather than working, run a short follow-up cell to regain " +
 		"control after interrupt, and prefer restructuring the work into smaller cells.";
-	return outputSoFar ? `${head}\n\nOutput so far:\n${outputSoFar}` : head;
+	let probeNote: string | undefined;
+	if (reconcileOutcome === "kernel-responsive") {
+		probeNote =
+			"A control-channel probe confirms the kernel process is alive; this cell (or one queued ahead of it) is still running.";
+	} else if (reconcileOutcome === "kernel-unresponsive") {
+		probeNote =
+			"Warning: the kernel did not answer a control-channel liveness probe. It may be wedged " +
+			"(e.g. a C extension holding the GIL) or its message transport may be stalled. If short " +
+			"follow-up cells also report this, the kernel likely needs a restart.";
+	} else if (reconcileOutcome === "no-kernel" || reconcileOutcome === "no-active-execution") {
+		probeNote =
+			"Note: this cell has not reached the kernel yet — kernel startup or an earlier cell is still in progress.";
+	}
+	const parts = [head];
+	if (probeNote) parts.push(probeNote);
+	if (outputSoFar) parts.push(`Output so far:\n${outputSoFar}`);
+	return parts.join("\n\n");
 }
 
 const BACKGROUNDED = Symbol("ipython-backgrounded");
@@ -795,17 +830,39 @@ export function createIpythonToolDefinition(
 					raced = await executePromise;
 				}
 				if (raced === BACKGROUNDED) {
-					// The cell keeps running; the kernel's serial queue makes the next
-					// ipython call wait behind it, which doubles as the poll mechanism.
-					// Late completion is intentionally not delivered as a message — the
-					// kernel namespace carries the results forward.
 					provisioner.markStartupBackgrounded();
 					executePromise.catch(() => undefined);
-					return {
-						content: [{ type: "text", text: backgroundedNotice(timeoutMs, streamedOutput) }],
-						details: { status: "backgrounded", stdout: streamedOutput },
-						isError: false,
-					};
+					// Reconcile before reporting: the kernel may have finished the cell
+					// already with the completion events lost or stalled (a stuck
+					// execution otherwise blocks the serial queue forever, and queued
+					// calls can never reach the busy-kernel recovery).
+					const reconcileOutcome = await provisioner
+						.reconcileBackgroundedExecution()
+						.catch(() => "no-kernel" as const);
+					if (reconcileOutcome === "flushed-after-reply") {
+						// The flush resolved the execute promise; return the real result
+						// instead of a misleading "still executing" notice.
+						raced = await Promise.race([
+							executePromise,
+							new Promise<typeof BACKGROUNDED>((resolve) => {
+								const settleTimer = globalThis.setTimeout(() => resolve(BACKGROUNDED), 1000);
+								if (settleTimer && typeof settleTimer === "object" && "unref" in settleTimer) {
+									settleTimer.unref();
+								}
+							}),
+						]);
+					}
+					if (raced === BACKGROUNDED) {
+						// The cell keeps running; the kernel's serial queue makes the next
+						// ipython call wait behind it, which doubles as the poll mechanism.
+						// Late completion is intentionally not delivered as a message — the
+						// kernel namespace carries the results forward.
+						return {
+							content: [{ type: "text", text: backgroundedNotice(timeoutMs, streamedOutput, reconcileOutcome) }],
+							details: { status: "backgrounded", stdout: streamedOutput, reconcileOutcome },
+							isError: false,
+						};
+					}
 				}
 				const { result: r, kernelRestarted } = raced;
 
