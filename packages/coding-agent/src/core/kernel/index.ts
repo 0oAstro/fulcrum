@@ -41,9 +41,22 @@ const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
 const KERNEL_ABORT_GRACE_MS = 1000;
 const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
+// The shell-channel execute_reply normally precedes the matching IOPub
+// `status: idle` by milliseconds. If idle still hasn't arrived this long after
+// the reply, treat the IOPub event as lost and finish the execution anyway.
+const EXECUTE_REPLY_IDLE_GRACE_MS = 2000;
+// Liveness probe over the control channel when reconciling a backgrounded cell.
+const CONTROL_PROBE_TIMEOUT_MS = 5000;
 const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
 const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE =
 	"IPython kernel is still running the previously interrupted cell. Wait and try again, or kill the IPython kernel to start fresh.";
+
+/** What reconciling a backgrounded cell against actual kernel state found. */
+export type KernelReconcileOutcome =
+	| "no-active-execution"
+	| "flushed-after-reply"
+	| "kernel-responsive"
+	| "kernel-unresponsive";
 
 export class KernelBusyAfterInterruptError extends Error {
 	constructor() {
@@ -318,6 +331,10 @@ interface ActiveExecution {
 	error?: ExecuteResult["error"];
 	status: ExecuteResult["status"];
 	settled: boolean;
+	/** The kernel sent execute_reply on the shell channel — the cell is done. */
+	gotExecuteReply: boolean;
+	/** Bounded wait for the IOPub idle after execute_reply; finishes the execution if idle never lands. */
+	idleGraceTimer?: ReturnType<typeof globalThis.setTimeout>;
 	resolve: (result: ExecuteResult) => void;
 	reject: (error: Error) => void;
 }
@@ -527,6 +544,11 @@ export class KernelManager {
 	private iopub?: Subscriber;
 	private control?: Dealer;
 	private iopubPumpPromise?: Promise<void>;
+	private shellPumpPromise?: Promise<void>;
+	/** Memoizes concurrent control-channel liveness probes onto one request. */
+	private controlProbePromise?: Promise<boolean>;
+	/** The one in-flight control.receive(); reused so an abandoned probe never leaves the socket busy. */
+	private controlReceive?: Promise<Buffer[]>;
 	private connection?: ConnectionInfo;
 	private tempDir?: string;
 	private kernelStderr = "";
@@ -731,6 +753,8 @@ export class KernelManager {
 			throw e;
 		}
 
+		// probeReady owns shell.receive() until it returns; only then may the pump take over.
+		this.startShellPump();
 		this.state = "running";
 		this.reportStartupStage("ready", startOptions.onBootstrapProgress);
 		this.startForkedLivenessMonitor();
@@ -909,6 +933,7 @@ export class KernelManager {
 			sentAgentMessages: [],
 			status: "ok",
 			settled: false,
+			gotExecuteReply: false,
 			resolve: result.resolve,
 			reject: result.reject,
 		};
@@ -1000,6 +1025,77 @@ export class KernelManager {
 		}
 	}
 
+	private startShellPump(): void {
+		if (this.shellPumpPromise) {
+			return;
+		}
+		this.shellPumpPromise = this.runShellPump();
+	}
+
+	private async runShellPump(): Promise<void> {
+		const shell = this.shell;
+		if (!shell) {
+			return;
+		}
+
+		try {
+			for await (const frames of shell) {
+				const incoming = decode(frames);
+				if (!incoming) continue;
+				this.handleShellMessage(incoming);
+			}
+		} catch (error) {
+			// IOPub stays the authoritative completion channel; losing the shell pump
+			// only disables the execute_reply fallback, so don't reject in-flight work.
+			if ((this.state as string) !== "shutdown") {
+				this.appendKernelDiagnostic(`shell pump failed: ${errorMessage(error)}`);
+			}
+		} finally {
+			if (this.shell === shell) {
+				this.shellPumpPromise = undefined;
+			}
+		}
+	}
+
+	private handleShellMessage(incoming: JupyterMessage): void {
+		if (incoming.header.msg_type !== "execute_reply") {
+			return;
+		}
+		const execution = this.activeExecution;
+		const parentMessageId = (incoming.parent_header as { msg_id?: string }).msg_id;
+		if (!execution || parentMessageId !== execution.requestMsgId || execution.gotExecuteReply) {
+			return;
+		}
+		execution.gotExecuteReply = true;
+		if (!execution.settled) {
+			const c = incoming.content as { status?: string; ename?: string; evalue?: string; traceback?: string[] };
+			if (c.status === "aborted" && execution.status === "ok") {
+				execution.status = "aborted";
+			} else if (c.status === "error" && execution.status === "ok") {
+				execution.status = "error";
+				if (!execution.error && c.ename) {
+					execution.error = { ename: c.ename, evalue: c.evalue ?? "", traceback: c.traceback ?? [] };
+				}
+			}
+		}
+		// The kernel has finished this cell. The matching IOPub `status: idle`
+		// normally lands within milliseconds and settles the execution; if the
+		// IOPub flow stalled or dropped it, finish after a bounded grace period
+		// instead of leaving the execution (and the serial queue) stuck forever.
+		const timer = globalThis.setTimeout(() => {
+			if (this.activeExecution === execution) {
+				this.appendKernelDiagnostic(
+					`execute_reply for ${execution.requestMsgId} got no IOPub idle within ${EXECUTE_REPLY_IDLE_GRACE_MS}ms; finishing via shell fallback`,
+				);
+				this.finishActiveExecution(execution);
+			}
+		}, EXECUTE_REPLY_IDLE_GRACE_MS);
+		if (timer && typeof timer === "object" && "unref" in timer) {
+			timer.unref();
+		}
+		execution.idleGraceTimer = timer;
+	}
+
 	private handleExecutionMessage(incoming: JupyterMessage): void {
 		const execution = this.activeExecution;
 		const parentMessageId = (incoming.parent_header as { msg_id?: string }).msg_id;
@@ -1074,6 +1170,10 @@ export class KernelManager {
 	}
 
 	private resolveExecution(execution: ActiveExecution, options: { clearActive: boolean }): void {
+		if (execution.idleGraceTimer) {
+			globalThis.clearTimeout(execution.idleGraceTimer);
+			execution.idleGraceTimer = undefined;
+		}
 		const didClearActive = options.clearActive && this.activeExecution === execution;
 		if (options.clearActive && this.activeExecution === execution) {
 			this.activeExecution = undefined;
@@ -1146,6 +1246,10 @@ export class KernelManager {
 		const execution = this.activeExecution;
 		if (!execution) {
 			return;
+		}
+		if (execution.idleGraceTimer) {
+			globalThis.clearTimeout(execution.idleGraceTimer);
+			execution.idleGraceTimer = undefined;
 		}
 		this.activeExecution = undefined;
 		execution.reject(error);
@@ -1309,6 +1413,112 @@ export class KernelManager {
 		await this.control.send(encode(msg, this.connection.key));
 	}
 
+	/**
+	 * Called after a tool-level timeout backgrounds a cell: distinguishes a cell
+	 * that is genuinely still running from an execution the kernel already
+	 * finished whose completion events were lost or stalled, and flushes the
+	 * latter so the serial queue can drain instead of blocking forever.
+	 */
+	async reconcileBackgroundedExecution(probeTimeoutMs = CONTROL_PROBE_TIMEOUT_MS): Promise<KernelReconcileOutcome> {
+		const execution = this.activeExecution;
+		if (!execution) {
+			return "no-active-execution";
+		}
+		const flush = (): boolean => {
+			if (this.activeExecution !== execution || !execution.gotExecuteReply) {
+				return false;
+			}
+			this.appendKernelDiagnostic(
+				`reconcile: execute_reply already received for ${execution.requestMsgId}; flushing stalled execution`,
+			);
+			this.finishActiveExecution(execution);
+			return true;
+		};
+		if (flush()) {
+			return "flushed-after-reply";
+		}
+		const responsive = await this.probeControlChannel(probeTimeoutMs);
+		// The reply may have landed while the probe was in flight.
+		if (flush()) {
+			return "flushed-after-reply";
+		}
+		if (!responsive) {
+			this.appendKernelDiagnostic(
+				`reconcile: kernel did not answer a control-channel probe within ${probeTimeoutMs}ms`,
+			);
+			return "kernel-unresponsive";
+		}
+		return "kernel-responsive";
+	}
+
+	private probeControlChannel(timeoutMs: number): Promise<boolean> {
+		if (!this.controlProbePromise) {
+			this.controlProbePromise = this.runControlProbe(timeoutMs).finally(() => {
+				this.controlProbePromise = undefined;
+			});
+		}
+		return this.controlProbePromise;
+	}
+
+	private async runControlProbe(timeoutMs: number): Promise<boolean> {
+		const control = this.control;
+		const conn = this.connection;
+		if (!control || !conn) {
+			return false;
+		}
+		const msg = buildMessage("kernel_info_request", {}, this.session, this.options.username);
+		const requestMsgId = msg.header.msg_id;
+		try {
+			await control.send(encode(msg, conn.key));
+		} catch {
+			return false;
+		}
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			let winner: { kind: "frames"; frames: Buffer[] } | { kind: "timeout" };
+			try {
+				winner = await Promise.race([
+					this.nextControlMessage().then((frames) => ({ kind: "frames" as const, frames })),
+					sleep(deadline - Date.now()).then(() => ({ kind: "timeout" as const })),
+				]);
+			} catch {
+				return false;
+			}
+			if (winner.kind === "timeout") {
+				return false;
+			}
+			const incoming = decode(winner.frames);
+			if (
+				incoming?.header.msg_type === "kernel_info_reply" &&
+				(incoming.parent_header as { msg_id?: string }).msg_id === requestMsgId
+			) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Nobody else drains the control socket; sharing one receive() keeps an abandoned probe from wedging it. */
+	private nextControlMessage(): Promise<Buffer[]> {
+		const control = this.control;
+		if (!control) {
+			return Promise.reject(new Error("Kernel control channel is not connected"));
+		}
+		if (!this.controlReceive) {
+			this.controlReceive = control.receive().then(
+				(frames) => {
+					this.controlReceive = undefined;
+					return frames as Buffer[];
+				},
+				(error) => {
+					this.controlReceive = undefined;
+					throw error instanceof Error ? error : new Error(String(error));
+				},
+			);
+		}
+		return this.controlReceive;
+	}
+
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
@@ -1324,6 +1534,9 @@ export class KernelManager {
 		this.iopub = undefined;
 		this.control = undefined;
 		this.iopubPumpPromise = undefined;
+		this.shellPumpPromise = undefined;
+		this.controlProbePromise = undefined;
+		this.controlReceive = undefined;
 		try {
 			if (this.kernel) {
 				this.kernel.kill(killSignal);
