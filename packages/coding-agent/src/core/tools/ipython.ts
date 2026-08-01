@@ -692,7 +692,14 @@ function backgroundedNotice(
 	let probeNote: string | undefined;
 	if (reconcileOutcome === "kernel-responsive") {
 		probeNote =
-			"A control-channel probe confirms the kernel process is alive; this cell (or one queued ahead of it) is still running.";
+			"A control-channel probe confirms the kernel process is alive; this cell (or one queued ahead of it) is still running. " +
+			"If it keeps running with no new output across repeated polls, it will be interrupted automatically to unblock the queue " +
+			"— long-running work should print progress (or run via a background process) to avoid this.";
+	} else if (reconcileOutcome === "auto-interrupted") {
+		probeNote =
+			"A cell that kept running with no output across repeated polls was automatically interrupted, and the kernel is " +
+			"responsive again. The interrupted cell ends with KeyboardInterrupt; variables it assigned before the interrupt " +
+			"remain. Your queued cell should run now — issue a follow-up call to see its result.";
 	} else if (reconcileOutcome === "kernel-unresponsive") {
 		probeNote =
 			"Warning: the kernel did not answer a control-channel liveness probe. It may be wedged " +
@@ -707,6 +714,11 @@ function backgroundedNotice(
 	if (outputSoFar) parts.push(`Output so far:\n${outputSoFar}`);
 	return parts.join("\n\n");
 }
+
+const WEDGED_KERNEL_RESTART_NOTICE =
+	"A previous cell was stuck — no output across repeated polls and unresponsive to repeated automatic " +
+	"interrupts — so the IPython kernel was killed; a fresh kernel starts on the next call. Variables, " +
+	"imports, async tasks, and open resources are gone; recreate what you need, then resubmit this cell.";
 
 const BACKGROUNDED = Symbol("ipython-backgrounded");
 
@@ -839,18 +851,37 @@ export function createIpythonToolDefinition(
 					const reconcileOutcome = await provisioner
 						.reconcileBackgroundedExecution()
 						.catch(() => "no-kernel" as const);
-					if (reconcileOutcome === "flushed-after-reply") {
-						// The flush resolved the execute promise; return the real result
+					if (reconcileOutcome === "flushed-after-reply" || reconcileOutcome === "auto-interrupted") {
+						// The flush (or auto-interrupt of the stuck cell ahead) may let
+						// this call's execute promise settle; return the real result
 						// instead of a misleading "still executing" notice.
+						const settleMs = reconcileOutcome === "auto-interrupted" ? 5000 : 1000;
 						raced = await Promise.race([
 							executePromise,
 							new Promise<typeof BACKGROUNDED>((resolve) => {
-								const settleTimer = globalThis.setTimeout(() => resolve(BACKGROUNDED), 1000);
+								const settleTimer = globalThis.setTimeout(() => resolve(BACKGROUNDED), settleMs);
 								if (settleTimer && typeof settleTimer === "object" && "unref" in settleTimer) {
 									settleTimer.unref();
 								}
 							}),
 						]);
+					}
+					if (raced === BACKGROUNDED && reconcileOutcome === "kernel-wedged") {
+						// Repeated auto-interrupts provably did nothing (e.g. a C
+						// extension holding the GIL): restart the kernel so the session
+						// regains a working queue instead of stalling forever.
+						setToolWorkingMessage("Restarting IPython kernel...");
+						await provisioner.kill();
+						return {
+							content: [{ type: "text", text: WEDGED_KERNEL_RESTART_NOTICE }],
+							details: {
+								status: "backgrounded",
+								stdout: streamedOutput,
+								reconcileOutcome,
+								kernelRestarted: true,
+							},
+							isError: false,
+						};
 					}
 					if (raced === BACKGROUNDED) {
 						// The cell keeps running; the kernel's serial queue makes the next
