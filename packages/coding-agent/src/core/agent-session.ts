@@ -9198,6 +9198,15 @@ export class AgentSession {
 		return true;
 	}
 
+	/** Stop retaining an idle daemon child without deleting its durable registry row. */
+	releaseFinishedRlmChildSession(childId: string, session: AgentSession): boolean {
+		if (this._retainedRlmChildSessions.get(childId) !== session) return false;
+		this._retainedRlmChildUnsubscribes.get(childId)?.();
+		this._retainedRlmChildUnsubscribes.delete(childId);
+		this._retainedRlmChildSessions.delete(childId);
+		return true;
+	}
+
 	/** True when any direct or nested subagent is still running or queued. */
 	hasRunningRlmChildren(): boolean {
 		for (const run of this._activeRlmChildRuns.values()) {

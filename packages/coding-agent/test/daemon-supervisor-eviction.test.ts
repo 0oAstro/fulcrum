@@ -127,6 +127,38 @@ describe("daemon supervisor whole-tree eviction", () => {
 		expect([...supervisor.workers.keys()].sort()).toEqual(["active", "attached", "cron", "heartbeat"]);
 	});
 
+	it("delegates capped child passivation only to live non-evictable workers", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const active = makeWorker("active", [
+			makeSummary("active-root", now, { isSessionActive: true }),
+			makeSummary("idle-child", now, { runtimeKind: "subagent", parentActiveSessionId: "active-root" }),
+		]);
+		const whollyIdle = makeWorker("wholly-idle", [makeSummary("idle-root", now)]);
+		active.client!.requestWorker.mockResolvedValue({
+			type: "response",
+			command: "worker_passivate_idle_children",
+			success: true,
+			data: { count: 1 },
+		});
+		supervisor.workers.set("active", active);
+		supervisor.workers.set("wholly-idle", whollyIdle);
+
+		await supervisor.runIdleEvictionSweep(now);
+
+		expect(active.client?.requestWorker).toHaveBeenCalledWith(
+			{
+				type: "worker_passivate_idle_children",
+				idleEvictionMinutes: 90,
+				now,
+				limit: 2,
+			},
+			30_000,
+		);
+		expect(whollyIdle.client?.requestWorker).not.toHaveBeenCalled();
+		expect(supervisor.stopWorker).toHaveBeenCalledWith(whollyIdle, true);
+	});
+
 	it("uses canonical busy state so a stale parent with a running child is not evicted", async () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
 		const supervisor = makeSupervisor();

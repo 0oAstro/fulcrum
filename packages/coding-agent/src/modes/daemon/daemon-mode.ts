@@ -97,6 +97,11 @@ import type {
 	RlmSubagentRuntime,
 	SubagentRuntimeHost,
 } from "../../core/rlm-runtime.js";
+import {
+	canPassivateSession,
+	type IdleEvictionMinutes,
+	type SessionPassivationSnapshot,
+} from "../../core/session-action-store.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { acquireSessionLease, type SessionLease } from "../../core/session-lease.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
@@ -406,6 +411,13 @@ export class AgentDaemon {
 	/** Covers path resolution through publication in openingSessions, before the runtime promise exists. */
 	private readonly reservingSessionOpens = new Map<string, Promise<void>>();
 	private readonly bindingCompletions = new Map<string, Promise<void>>();
+	/**
+	 * Resolved-session-file keyed passivations let wake paths join after closeSessionOnce
+	 * removes the live session. This intentionally complements closingSessions: that map
+	 * coalesces every close by transient activeSessionId, while this one identifies the
+	 * passivation-only close reason by the durable identity needed by hydration/opening.
+	 */
+	private readonly passivatingSessions = new Map<string, Promise<void>>();
 	private readonly closingSessions = new Map<string, Promise<void>>();
 	private readonly sideQuestionRuns = new Map<
 		string,
@@ -1223,6 +1235,10 @@ export class AgentDaemon {
 			? await resolveDaemonSessionPath(command.sessionPath, cwd, config.sessionDir)
 			: undefined;
 		const sessionKey = sessionPath ? resolve(sessionPath) : undefined;
+		if (sessionKey && this.findPassivationBySessionFile(sessionKey)) {
+			await this.waitForPassivation(sessionKey);
+			return this.createRuntime(command, runtimeOpenGuard);
+		}
 		const pending = sessionKey ? this.openingSessions.get(sessionKey) : undefined;
 		if (pending && sessionKey) {
 			// Join the in-process open before attempting the filesystem lease. The
@@ -2014,7 +2030,15 @@ export class AgentDaemon {
 			return this.getBoundSessionState(id);
 		} catch (error) {
 			if (error instanceof BoundSessionUnavailableError) {
-				return this.waitForBoundSession(this.getSessionState(id));
+				const closing = this.getSessionState(id);
+				const sessionFile = closing.runtime.session.sessionFile;
+				if (sessionFile && this.findPassivationBySessionFile(sessionFile)) {
+					await this.waitForPassivation(sessionFile);
+					const passive = await this.findPassiveRlmSubagent(sessionFile);
+					if (passive) return this.hydratePassiveRlmSubagent(passive);
+					return this.getOrHydrateBoundSessionState(id);
+				}
+				return this.waitForBoundSession(closing);
 			}
 			lookupError = error;
 		}
@@ -2240,9 +2264,136 @@ export class AgentDaemon {
 		return runtime;
 	}
 
+	private async sessionPassivationSnapshot(
+		state: ActiveSessionState,
+		passiveRlmSubagents?: readonly PassiveRlmSubagent[],
+	): Promise<SessionPassivationSnapshot> {
+		const summary = summaryForActiveSession(state);
+		const sessionFile = state.runtime.session.sessionFile;
+		const jobs = this.cronStore
+			.list()
+			.filter(
+				(job) =>
+					job.activeSessionId === state.activeSessionId &&
+					job.status !== "cancelled" &&
+					job.status !== "completed",
+			);
+		const passiveDescendants = passiveRlmSubagents ?? (await this.listPassiveRlmSubagents());
+		return {
+			isSessionActive: summary.isSessionActive || summary.hasRunningRlmChildren === true,
+			attachedClients: state.clients.size,
+			hasRegisteredHeartbeat: jobs.some((job) => isHeartbeatCronJob(job) && job.status === "active"),
+			hasRegisteredCronJob: jobs.some((job) => !isHeartbeatCronJob(job)),
+			lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
+			hasParent: state.runtime.metadata.kind === "subagent" && !!state.runtime.metadata.parentActiveSessionId,
+			hasNonPassiveDescendants: getChildActiveSessionStates(this.sessions, state).length > 0,
+			isHydrating:
+				this.bindingSessions.has(state.activeSessionId) ||
+				(sessionFile ? this.openingSessions.has(resolve(sessionFile)) : false) ||
+				passiveDescendants.some(
+					(passive) =>
+						passive.rootParentState === state &&
+						passive.chain.some((entry) => this.openingSessions.has(resolve(entry.sessionFile))),
+				),
+		};
+	}
+
+	private async passivateSession(
+		state: ActiveSessionState,
+		idleEvictionMinutes: IdleEvictionMinutes,
+		now: number,
+		selectedSnapshot?: SessionPassivationSnapshot,
+	): Promise<boolean> {
+		const sessionFile = state.runtime.session.sessionFile;
+		const metadata = state.runtime.metadata;
+		if (!sessionFile || metadata.kind !== "subagent" || !metadata.rlmChildId || !metadata.parentActiveSessionId) {
+			return false;
+		}
+		const sessionKey = resolve(sessionFile);
+		const parentActiveSessionId = metadata.parentActiveSessionId;
+		const childId = metadata.rlmChildId;
+		const existing = this.passivatingSessions.get(sessionKey);
+		if (existing) {
+			await existing;
+			return false;
+		}
+		const snapshot = selectedSnapshot ?? (await this.sessionPassivationSnapshot(state));
+		if (!canPassivateSession(snapshot, idleEvictionMinutes, now)) return false;
+
+		// Publish the durable identity before running the close so opens and lazy
+		// hydration can join throughout closeSessionOnce, including after sessions.delete.
+		const passivation = Promise.resolve().then(async () => {
+			// Fence against touches and state changes after candidate selection. This
+			// snapshot is intentionally fresh rather than reusing the sweep snapshot.
+			if (
+				this.shuttingDown ||
+				this.updateRestart !== undefined ||
+				this.sessions.get(state.activeSessionId) !== state ||
+				!canPassivateSession(await this.sessionPassivationSnapshot(state), idleEvictionMinutes, now)
+			) {
+				return;
+			}
+			const parentState = this.sessions.get(parentActiveSessionId);
+			if (!parentState) return;
+			const idleMinutes = Math.floor((now - snapshot.lastActivityAt) / 60_000);
+			// Detach parent tracking before the standard graceful runtime disposal. The
+			// registry/catalog rows remain the sole passive representation.
+			if (!parentState.runtime.session.releaseFinishedRlmChildSession(childId, state.runtime.session)) {
+				return;
+			}
+			await this.closeSession(state, "shutdown", true, false);
+			this.log(
+				`Passivated idle child sessionId=${state.runtime.session.sessionId} name=${JSON.stringify(state.runtime.session.sessionName ?? "")} idleMinutes=${idleMinutes}`,
+			);
+		});
+		this.passivatingSessions.set(sessionKey, passivation);
+		try {
+			await passivation;
+			return this.sessions.get(state.activeSessionId) !== state;
+		} finally {
+			if (this.passivatingSessions.get(sessionKey) === passivation) {
+				this.passivatingSessions.delete(sessionKey);
+			}
+		}
+	}
+
+	private async passivateIdleChildren(
+		idleEvictionMinutes: IdleEvictionMinutes,
+		now: number,
+		limit: number,
+	): Promise<number> {
+		if (this.shuttingDown || this.updateRestart !== undefined || limit <= 0) return 0;
+		const states = [...this.sessions.values()];
+		const passiveRlmSubagents = await this.listPassiveRlmSubagents();
+		const snapshots = await Promise.all(
+			states.map(async (state) => ({
+				state,
+				snapshot: await this.sessionPassivationSnapshot(state, passiveRlmSubagents),
+			})),
+		);
+		const candidates = snapshots
+			.filter(({ snapshot }) => canPassivateSession(snapshot, idleEvictionMinutes, now))
+			.sort((left, right) => left.snapshot.lastActivityAt - right.snapshot.lastActivityAt)
+			.slice(0, limit);
+		const results = await Promise.all(
+			candidates.map(({ state, snapshot }) => this.passivateSession(state, idleEvictionMinutes, now, snapshot)),
+		);
+		return results.filter(Boolean).length;
+	}
+
+	private findPassivationBySessionFile(sessionFile: string): Promise<void> | undefined {
+		return this.passivatingSessions.get(resolve(sessionFile));
+	}
+
+	private async waitForPassivation(sessionFile: string): Promise<void> {
+		const passivation = this.findPassivationBySessionFile(sessionFile);
+		if (passivation) await passivation;
+	}
+
 	private async hydratePassiveRlmSubagent(passive: PassiveRlmSubagent): Promise<ActiveSessionState> {
 		let parentState = passive.rootParentState;
 		for (const entry of passive.chain) {
+			await this.waitForPassivation(entry.sessionFile);
 			parentState = await this.rehydrateCompletedRlmSubagent(parentState, entry);
 		}
 		return parentState;
@@ -2885,6 +3036,11 @@ export class AgentDaemon {
 					}
 					this.writeWorkerSuccess(client, command);
 					setImmediate(() => void this.shutdown(0));
+					return;
+				}
+				case "worker_passivate_idle_children": {
+					const count = await this.passivateIdleChildren(command.idleEvictionMinutes, command.now, command.limit);
+					this.writeWorkerSuccess(client, command, { count });
 					return;
 				}
 				case "worker_deliver_message": {
@@ -4435,7 +4591,7 @@ export class AgentDaemon {
 			targetState = this.getBoundSessionState(targetSelector);
 		} catch (error) {
 			if (error instanceof BoundSessionUnavailableError) {
-				targetState = await this.waitForBoundSession(this.getSessionState(targetSelector));
+				targetState = await this.getOrHydrateBoundSessionState(targetSelector);
 			} else {
 				const passiveSubagent = await this.findPassiveRlmSubagent(targetSelector);
 				if (passiveSubagent) {
@@ -4970,6 +5126,7 @@ export class AgentDaemon {
 		state: ActiveSessionState,
 		reason: DaemonSessionClosedReason,
 		waitForAbort = true,
+		cascadeChildren = true,
 	): Promise<void> {
 		this.abortWaitingPromptAdmissionsForSession(state.activeSessionId);
 		for (const client of state.clients) {
@@ -4980,7 +5137,9 @@ export class AgentDaemon {
 			await existingClose;
 			return;
 		}
-		const closePromise = Promise.resolve().then(() => this.closeSessionOnce(state, reason, waitForAbort));
+		const closePromise = Promise.resolve().then(() =>
+			this.closeSessionOnce(state, reason, waitForAbort, cascadeChildren),
+		);
 		this.closingSessions.set(state.activeSessionId, closePromise);
 		try {
 			await closePromise;
@@ -5004,6 +5163,7 @@ export class AgentDaemon {
 		state: ActiveSessionState,
 		reason: DaemonSessionClosedReason,
 		waitForAbort: boolean,
+		cascadeChildren: boolean,
 	): Promise<void> {
 		if (!this.sessions.has(state.activeSessionId)) {
 			return;
@@ -5016,7 +5176,7 @@ export class AgentDaemon {
 		// Abort in-flight status work before any await/dispose so it can't write
 		// agent_status to a session being torn down.
 		this.summarizer.forget(state.activeSessionId);
-		const cascadeError = await this.closeChildSessions(state, reason, waitForAbort);
+		const cascadeError = cascadeChildren ? await this.closeChildSessions(state, reason, waitForAbort) : undefined;
 		// Empty draft (no messages, config, or jobs): discard rather than persist an
 		// empty session file. Mirrors the detach-time discard so a config-bearing
 		// draft closed via kill/completed is never wiped.
