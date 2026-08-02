@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Agent, type StreamFn } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	type Context,
@@ -208,6 +208,17 @@ async function expectSettlesWithin(promise: Promise<void>, timeoutMs: number): P
 	expect(result).toBe("settled");
 }
 
+function findLastMessage(
+	messages: readonly AgentMessage[],
+	predicate: (message: AgentMessage) => boolean,
+): AgentMessage | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (predicate(message)) return message;
+	}
+	return undefined;
+}
+
 describe("AgentSession rlm recursion", () => {
 	let tempDir: string;
 	let session: AgentSession | undefined;
@@ -232,12 +243,13 @@ describe("AgentSession rlm recursion", () => {
 			subagentRuntimeHost?: SubagentRuntimeHost;
 			rlmSessionDir?: string;
 			sessionManager?: SessionManager;
+			settingsManager?: SettingsManager;
 		} = {},
 	): AgentSession {
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const sessionManager = options.sessionManager ?? SessionManager.create(tempDir, join(tempDir, "sessions"));
-		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const settingsManager = options.settingsManager ?? SettingsManager.create(tempDir, tempDir);
 
 		const agent = new Agent({
 			convertToLlm,
@@ -830,6 +842,200 @@ describe("AgentSession rlm recursion", () => {
 		expect(reloadedParentEntry.message.usage.input).toBe(result.usage.prompt_tokens);
 		expect(reloadedParentEntry.message.usage.output).toBe(result.usage.completion_tokens);
 		expect(reloadedParentEntry.message.usage.cost.total).toBe(10);
+	});
+
+	it("shows, validates, and persists per-chat max-depth changes without calling the model", async () => {
+		const root = createSession();
+
+		await root.prompt("/rlm-max-depth");
+		let status = findLastMessage(
+			root.messages,
+			(message) => message.role === "custom" && message.customType === "rlm_max_depth_status",
+		);
+		expect(status).toMatchObject({
+			content: "RLM max depth: 1 (source: default).",
+			details: { maxDepth: 1, source: "default", globalUpdated: false },
+		});
+
+		for (const command of [
+			"/rlm-max-depth -1",
+			"/rlm-max-depth garbage",
+			"/rlm-max-depth 1.5",
+			"/rlm-max-depth --global",
+			"/rlm-max-depth 2 --global extra",
+		]) {
+			await root.prompt(command);
+			expect(
+				findLastMessage(
+					root.messages,
+					(message) =>
+						message.role === "custom" &&
+						typeof message.content === "string" &&
+						message.content.startsWith("Command failed:"),
+				),
+			).toMatchObject({ content: expect.stringMatching(/non-negative integer|Usage/) });
+			expect(root.rlmMaxDepth).toBe(1);
+		}
+
+		await root.prompt("/rlm-max-depth 3");
+		status = findLastMessage(
+			root.messages,
+			(message) => message.role === "custom" && message.customType === "rlm_max_depth_status",
+		);
+		expect(root.rlmMaxDepth).toBe(3);
+		expect(status).toMatchObject({
+			content: "RLM max depth: 3 (source: chat).",
+			details: { maxDepth: 3, source: "chat", globalUpdated: false },
+		});
+		expect(root.messages.some((message) => message.role === "assistant")).toBe(false);
+
+		const stateEntries = root.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "custom" && entry.customType === "rlm_max_depth_state");
+		expect(stateEntries.at(-1)).toMatchObject({ data: { maxDepth: 3 } });
+	});
+
+	it("rehydrates chat max depth ahead of reconstruction config", async () => {
+		const root = createSession();
+		await root.prompt("/rlm-max-depth 3");
+		if (!root.sessionFile) throw new Error("Missing persisted session file");
+		const sessionFile = root.sessionFile;
+		root.dispose();
+
+		const resumedManager = SessionManager.open(sessionFile, join(tempDir, "sessions"));
+		const resumed = createSession({ sessionManager: resumedManager, maxDepth: 4 });
+		expect(resumed.rlmMaxDepth).toBe(3);
+		await resumed.prompt("/rlm-max-depth");
+		expect(
+			findLastMessage(
+				resumed.messages,
+				(message) => message.role === "custom" && message.customType === "rlm_max_depth_status",
+			),
+		).toMatchObject({ details: { maxDepth: 3, source: "chat" } });
+	});
+
+	it("reloads max depth and its source when navigating to a branch without an override", async () => {
+		vi.stubEnv("RLM_MAX_DEPTH", "0");
+		try {
+			const root = createSession();
+			await root.prompt("baseline branch");
+			await root.agent.waitForIdle();
+			const baselineLeafId = root.sessionManager.getLeafId();
+			if (!baselineLeafId) throw new Error("Missing baseline branch leaf");
+
+			await root.prompt("/rlm-max-depth 2");
+			expect(root.rlmMaxDepth).toBe(2);
+			expect(root.systemPrompt).toContain("A callable `rlm`");
+
+			await root.navigateTree(baselineLeafId, { summarize: false });
+			expect(root.rlmMaxDepth).toBe(0);
+			expect(root.systemPrompt).not.toContain("A callable `rlm`");
+
+			await root.prompt("/rlm-max-depth");
+			expect(
+				findLastMessage(
+					root.messages,
+					(message) => message.role === "custom" && message.customType === "rlm_max_depth_status",
+				),
+			).toMatchObject({
+				content: "RLM max depth: 0 (source: env).",
+				details: { maxDepth: 0, source: "env", globalUpdated: false },
+			});
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
+	it("applies --global to this chat and new sessions without changing existing sessions", async () => {
+		const current = createSession();
+		const existingSettings = SettingsManager.create(tempDir, tempDir);
+		const existing = createSession({ settingsManager: existingSettings });
+
+		await current.prompt("/rlm-max-depth 4 --global");
+		expect(current.rlmMaxDepth).toBe(4);
+		expect(existing.rlmMaxDepth).toBe(1);
+		expect(
+			findLastMessage(
+				current.messages,
+				(message) => message.role === "custom" && message.customType === "rlm_max_depth_status",
+			),
+		).toMatchObject({
+			content:
+				"RLM max depth: 4 (source: chat). Saved for this chat and as the global default for new sessions; other existing sessions are unchanged.",
+			details: { maxDepth: 4, source: "chat", globalUpdated: true },
+		});
+
+		const freshSettings = SettingsManager.create(tempDir, tempDir);
+		const fresh = createSession({ settingsManager: freshSettings });
+		expect(fresh.rlmMaxDepth).toBe(4);
+		await fresh.prompt("/rlm-max-depth");
+		expect(
+			findLastMessage(
+				fresh.messages,
+				(message) => message.role === "custom" && message.customType === "rlm_max_depth_status",
+			),
+		).toMatchObject({ details: { maxDepth: 4, source: "global" } });
+
+		current.dispose();
+		existing.dispose();
+	});
+
+	it("keeps a spawned child's chat override when reconstructed with its inherited config", async () => {
+		const root = createSession({ maxDepth: 2 });
+		const childResult = await root.runRlmChild("child with a durable override");
+		if (!childResult.session_dir) throw new Error("Missing child session directory");
+		const child = root.getRlmChildSession(basename(childResult.session_dir));
+		if (!child?.sessionFile) throw new Error("Missing persisted child session");
+
+		await child.prompt("/rlm-max-depth");
+		expect(
+			findLastMessage(
+				child.messages,
+				(message) => message.role === "custom" && message.customType === "rlm_max_depth_status",
+			),
+		).toMatchObject({ details: { maxDepth: 2, source: "inherited" } });
+		await child.prompt("/rlm-max-depth 3");
+		expect(child.rlmMaxDepth).toBe(3);
+		const childSessionFile = child.sessionFile;
+		root.dispose();
+
+		const rehydratedManager = SessionManager.open(childSessionFile, join(tempDir, "sessions"));
+		const rehydratedChild = createSession({ sessionManager: rehydratedManager, depth: 1, maxDepth: 2 });
+		expect(rehydratedChild.rlmMaxDepth).toBe(3);
+		await rehydratedChild.prompt("/rlm-max-depth");
+		expect(
+			findLastMessage(
+				rehydratedChild.messages,
+				(message) => message.role === "custom" && message.customType === "rlm_max_depth_status",
+			),
+		).toMatchObject({ details: { maxDepth: 3, source: "chat" } });
+	});
+
+	it("copies live max depth at spawn, keeps child overrides independent, and lets zero disable root spawning", async () => {
+		const root = createSession();
+		await root.prompt("/rlm-max-depth 2");
+		const childResult = await root.runRlmChild("first child");
+		if (!childResult.session_dir) throw new Error("Missing child session directory");
+		const child = root.getRlmChildSession(basename(childResult.session_dir));
+		if (!child) throw new Error("Missing retained child session");
+		expect(child.rlmMaxDepth).toBe(2);
+
+		await child.prompt("/rlm-max-depth 3");
+		expect(child.rlmMaxDepth).toBe(3);
+		expect((child as unknown as InspectableRlmDirSession)._rlmKernelEnv().RLM_MAX_DEPTH).toBe("3");
+		expect(root.rlmMaxDepth).toBe(2);
+		const grandchildResult = await child.runRlmChild("grandchild after override");
+		if (!grandchildResult.session_dir) throw new Error("Missing grandchild session directory");
+		const grandchild = child.getRlmChildSession(basename(grandchildResult.session_dir));
+		expect(grandchild?.rlmMaxDepth).toBe(3);
+
+		expect(root.systemPrompt).toContain("A callable `rlm`");
+		await root.prompt("/rlm-max-depth 0");
+		expect(root.systemPrompt).not.toContain("A callable `rlm`");
+		await expect(root.runRlmChild("blocked at root")).rejects.toThrow(
+			"RLM recursion depth limit reached (RLM_DEPTH=0, RLM_MAX_DEPTH=0)",
+		);
+		expect(child.rlmMaxDepth).toBe(3);
 	});
 
 	it("rejects child creation at the configured recursion depth cap", async () => {

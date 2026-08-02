@@ -2318,7 +2318,7 @@ export class AgentDaemon {
 						},
 						rlmSessionDir: entry.sessionDir,
 						rlmDepth: entry.rlmDepth,
-						rlmMaxDepth: entry.rlmMaxDepth ?? 1,
+						rlmMaxDepth: entry.rlmMaxDepth,
 						rlmParentNodeId: entry.rlmParentNodeId ?? entry.childId,
 					},
 					runtimeMetadata: {

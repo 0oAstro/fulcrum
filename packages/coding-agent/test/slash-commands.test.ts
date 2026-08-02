@@ -21,6 +21,16 @@ describe("built-in slash commands", () => {
 		expect(commandNames).not.toContain("cron");
 	});
 
+	test("describes the fine-grained /rlm-max-depth semantics", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "rlm-max-depth")).toMatchObject({
+			description:
+				"Set/view the per-chat persistent RLM max depth; only newly spawned children inherit it, child overrides win; --global sets only new sessions + this one",
+			argumentHint: "[<int> [--global]]",
+			takesArgument: true,
+			execution: "session",
+		});
+	});
+
 	test("exposes heartbeat syntax guidance", () => {
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "heartbeat")).toMatchObject({
 			description:
@@ -234,6 +244,11 @@ describe("session slash commands", () => {
 			name: "autonomous",
 			args: "status",
 			text: "/autonomous status",
+		});
+		expect(parseSessionSlashCommand("/rlm-max-depth 3 --global")).toEqual({
+			name: "rlm-max-depth",
+			args: "3 --global",
+			text: "/rlm-max-depth 3 --global",
 		});
 		expect(parseSessionSlashCommand("Explain /compact")).toBeUndefined();
 		expect(parseSessionSlashCommand(" /compact")).toBeUndefined();
