@@ -923,7 +923,7 @@ describe("daemon mode helpers", () => {
 		);
 	});
 
-	it("fails unknown local agent-message targets without worker remote retries", async () => {
+	it("routes nonresident agent-message targets through the supervisor wake path", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
 			createRuntime: async () => {
@@ -942,7 +942,9 @@ describe("daemon mode helpers", () => {
 				sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 			},
 		} as never;
-		const sendRemoteAgentSessionMessage = vi.fn();
+		const sendRemoteAgentSessionMessage = vi
+			.fn()
+			.mockRejectedValue(new Error("Unknown active session: deleted-child"));
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendRemoteAgentSessionMessage: typeof sendRemoteAgentSessionMessage;
@@ -964,7 +966,7 @@ describe("daemon mode helpers", () => {
 				origin: "agent",
 			}),
 		).rejects.toThrow("Unknown active session: deleted-child");
-		expect(sendRemoteAgentSessionMessage).not.toHaveBeenCalled();
+		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(source, "deleted-child", "continue", undefined);
 	});
 
 	it("reports queued status when a direct accept races into the queue", async () => {

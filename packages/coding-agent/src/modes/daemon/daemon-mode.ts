@@ -4338,15 +4338,6 @@ export class AgentDaemon {
 		};
 	}
 
-	private findRemoteAgentPeer(selector: string): AgentSessionMessageAgentSummary | undefined {
-		for (const peer of this.remoteAgentPeers.values()) {
-			if (peer.activeSessionId === selector || peer.sessionId === selector || peer.sessionName === selector) {
-				return peer;
-			}
-		}
-		return undefined;
-	}
-
 	// Half-bound sessions are hidden from other sessions' listings; the current
 	// session stays visible to itself (controllers run during its own bind).
 	private listTargetableSessionStates(current: ActiveSessionState): ActiveSessionState[] {
@@ -4456,7 +4447,9 @@ export class AgentDaemon {
 					);
 					if (hydratingChild) {
 						targetState = await this.waitForBoundSession(hydratingChild);
-					} else if (this.options.worker && options.fromState && this.findRemoteAgentPeer(targetSelector)) {
+					} else if (this.options.worker && options.fromState) {
+						// The supervisor can resolve and wake a saved worker even when it is no longer
+						// present in this worker's resident peer snapshot.
 						return this.sendRemoteAgentSessionMessage(
 							options.fromState,
 							targetSelector,

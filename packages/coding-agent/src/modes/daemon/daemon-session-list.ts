@@ -31,6 +31,12 @@ export interface SessionSummary {
 	activity: SessionActivity;
 	isSessionActive: boolean;
 	hasActiveHeartbeat?: boolean;
+	/** Any active heartbeat registered for this session. Paused heartbeats do not pin residency. */
+	hasRegisteredHeartbeat?: boolean;
+	/** Any active or paused non-heartbeat scheduled job registered for this session. */
+	hasRegisteredCronJob?: boolean;
+	/** Latest message activity, used by the supervisor residency policy. */
+	lastActivityAt?: string;
 	runtimeKind?: "top-level" | "subagent";
 	/** RLM spawn depth (0 for roots); fork edges preserve the source depth. */
 	rlmDepth?: number;
@@ -102,11 +108,23 @@ export function buildSessionList(
 	scheduledJobs: readonly AgentCronJob[] = [],
 ): SessionSummary[] {
 	const activeBySessionFile = new Map<string, ActiveSessionState>();
-	const heartbeatSessionIds = new Set(
-		scheduledJobs
-			.filter((job) => job.status === "active" && isHeartbeatCronJob(job))
-			.map((job) => job.activeSessionId),
-	);
+	const heartbeatSessionIds = new Set<string>();
+	const registeredHeartbeatSessionIds = new Set<string>();
+	const registeredCronSessionIds = new Set<string>();
+	const registeredHeartbeatSessionFiles = new Set<string>();
+	const registeredCronSessionFiles = new Set<string>();
+	for (const job of scheduledJobs) {
+		const heartbeat = isHeartbeatCronJob(job);
+		if (heartbeat && job.status === "active") heartbeatSessionIds.add(job.activeSessionId);
+		// A paused heartbeat cannot fire, so unlike a live heartbeat (or a registered
+		// cron job) it must not silently pin a worker forever.
+		const registered = heartbeat ? job.status === "active" : job.status === "active" || job.status === "paused";
+		if (!registered) continue;
+		const ids = heartbeat ? registeredHeartbeatSessionIds : registeredCronSessionIds;
+		const files = heartbeat ? registeredHeartbeatSessionFiles : registeredCronSessionFiles;
+		ids.add(job.activeSessionId);
+		files.add(resolve(job.sessionFile));
+	}
 
 	for (const activeSession of activeSessions) {
 		const sessionFile = activeSession.runtime.session.sessionFile;
@@ -126,18 +144,32 @@ export function buildSessionList(
 					activeSession,
 					savedSession,
 					heartbeatSessionIds.has(activeSession.activeSessionId),
+					registeredHeartbeatSessionIds.has(activeSession.activeSessionId),
+					registeredCronSessionIds.has(activeSession.activeSessionId),
 				),
 			);
 			seenActiveSessionIds.add(activeSession.activeSessionId);
 			continue;
 		}
-		entries.push(summaryForInactiveSession(savedSession));
+		entries.push(
+			summaryForInactiveSession(
+				savedSession,
+				registeredHeartbeatSessionFiles.has(sessionFile),
+				registeredCronSessionFiles.has(sessionFile),
+			),
+		);
 	}
 
 	for (const activeSession of activeSessions) {
 		if (!seenActiveSessionIds.has(activeSession.activeSessionId)) {
 			entries.push(
-				summaryForActiveSession(activeSession, undefined, heartbeatSessionIds.has(activeSession.activeSessionId)),
+				summaryForActiveSession(
+					activeSession,
+					undefined,
+					heartbeatSessionIds.has(activeSession.activeSessionId),
+					registeredHeartbeatSessionIds.has(activeSession.activeSessionId),
+					registeredCronSessionIds.has(activeSession.activeSessionId),
+				),
 			);
 		}
 	}
@@ -148,6 +180,8 @@ export function summaryForActiveSession(
 	activeSession: ActiveSessionState,
 	savedSession?: SessionInfo,
 	hasActiveHeartbeat = false,
+	hasRegisteredHeartbeat = hasActiveHeartbeat,
+	hasRegisteredCronJob = false,
 ): SessionSummary {
 	const session = activeSession.runtime.session;
 	const metadata = activeSession.runtime.metadata ?? { kind: "top-level" as const };
@@ -166,6 +200,10 @@ export function summaryForActiveSession(
 		activity: activeActivityForSession(activeSession),
 		isSessionActive: session.isSessionActive,
 		hasActiveHeartbeat: hasActiveHeartbeat || undefined,
+		hasRegisteredHeartbeat: hasRegisteredHeartbeat || undefined,
+		hasRegisteredCronJob: hasRegisteredCronJob || undefined,
+		lastActivityAt:
+			latestMessageActivityAt(session.messages) ?? modified ?? session.sessionManager.getHeader?.()?.timestamp,
 		runtimeKind: metadata.kind,
 		rlmDepth: session.rlmDepth,
 		activeSessionId: activeSession.activeSessionId,
@@ -214,17 +252,35 @@ export function summaryForActiveSession(
 	};
 }
 
+function latestMessageActivityAt(messages: readonly AgentMessage[]): string | undefined {
+	let latest: number | undefined;
+	for (const message of messages) {
+		// Tool results and custom messages are real session activity too. Looking at
+		// every timestamp also keeps this correct for future AgentMessage variants.
+		if (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)) {
+			latest = latest === undefined ? message.timestamp : Math.max(latest, message.timestamp);
+		}
+	}
+	return latest === undefined ? undefined : new Date(latest).toISOString();
+}
+
 export function isSummaryCurrent(activeSession: ActiveSessionState): boolean {
 	const status = activeSession.summaryState;
 	return status !== undefined && status.basedOnMessageCount === activeSession.runtime.session.messages.length;
 }
 
-export function summaryForInactiveSession(session: SessionInfo): SessionSummary {
+export function summaryForInactiveSession(
+	session: SessionInfo,
+	hasRegisteredHeartbeat = false,
+	hasRegisteredCronJob = false,
+): SessionSummary {
 	return {
 		id: session.id,
 		lifecycle: inactiveLifecycleForSession(session),
 		activity: "idle",
 		isSessionActive: false,
+		hasRegisteredHeartbeat: hasRegisteredHeartbeat || undefined,
+		hasRegisteredCronJob: hasRegisteredCronJob || undefined,
 		sessionId: session.id,
 		sessionFile: session.path,
 		sessionName: session.name,
@@ -237,6 +293,7 @@ export function summaryForInactiveSession(session: SessionInfo): SessionSummary 
 		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		created: session.created.toISOString(),
 		modified: session.modified.toISOString(),
+		lastActivityAt: session.modified.toISOString(),
 		firstMessage: session.firstMessage,
 		parentSessionPath: session.parentSessionPath,
 		rlmDepth: session.rlmDepth,
