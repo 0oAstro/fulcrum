@@ -671,6 +671,55 @@ describe("daemon mode helpers", () => {
 		expect(missingSession.disposeAsync).toHaveBeenCalledOnce();
 	});
 
+	it("cancels child jobs when deletion joins an in-flight passivation close", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-passivation-race-"));
+		let releaseDispose!: () => void;
+		const disposeGate = new Promise<void>((resolve) => {
+			releaseDispose = resolve;
+		});
+		let markDisposeStarted!: () => void;
+		const disposeStarted = new Promise<void>((resolve) => {
+			markDisposeStarted = resolve;
+		});
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir, {
+				childDisposeStarted: markDisposeStarted,
+				childDisposeGate: disposeGate,
+			});
+			const internals = fixture.daemon as unknown as {
+				cronStore: AgentCronJobStore;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+				passivateIdleChildren(threshold: number, now: number, limit: number): Promise<number>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			(
+				parentState.runtime.session as unknown as { releaseFinishedRlmChildSession: ReturnType<typeof vi.fn> }
+			).releaseFinishedRlmChildSession = vi.fn(() => true);
+			const passivation = internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1);
+			await disposeStarted;
+			const job = internals.cronStore.create({
+				activeSessionId: childState.activeSessionId,
+				sessionId: childState.runtime.session.sessionId,
+				sessionFile: fixture.childSessionFile,
+				cwd: tempDir,
+				scheduleText: "every 5m",
+				prompt: "scheduled child work",
+			});
+			const deletion = internals
+				.createSubagentRuntimeHost(parentState)
+				.deleteRlmSubagentRuntime(fixture.childId, childState.runtime.session);
+			releaseDispose();
+
+			await Promise.all([passivation, deletion]);
+			expect(internals.cronStore.list().find((candidate) => candidate.id === job.id)?.status).toBe("cancelled");
+		} finally {
+			releaseDispose();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps a child live when its durable deletion boundary cannot be read", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-registry-failure-"));
 		try {
@@ -3958,6 +4007,50 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("keeps an idle child resident while an agent message waits for admission", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-admission-passivation-race-"));
+		let releaseAdmission!: () => void;
+		const admissionGate = new Promise<void>((resolve) => {
+			releaseAdmission = resolve;
+		});
+		let markAdmissionStarted!: () => void;
+		const admissionStarted = new Promise<void>((resolve) => {
+			markAdmissionStarted = resolve;
+		});
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir, {
+				childAdmissionStarted: markAdmissionStarted,
+				childAdmissionGate: admissionGate,
+			});
+			const internals = fixture.daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createAgentMessageController(
+					getCurrentState: () => ActiveSessionState | undefined,
+				): AgentSessionMessageController;
+				passivateIdleChildren(threshold: number, now: number, limit: number): Promise<number>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			(
+				parentState.runtime.session as unknown as { releaseFinishedRlmChildSession: ReturnType<typeof vi.fn> }
+			).releaseFinishedRlmChildSession = vi.fn(() => true);
+
+			const delivery = internals
+				.createAgentMessageController(() => parentState)
+				.sendAgentMessage({ target: fixture.childId, message: "admit after gate" });
+			await admissionStarted;
+
+			await expect(internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1)).resolves.toBe(0);
+			expect(internals.sessions.get(childState.activeSessionId)).toBe(childState);
+			releaseAdmission();
+			await expect(delivery).resolves.toMatchObject({ deliveryStatus: "delivered" });
+		} finally {
+			releaseAdmission();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("waits for passivation before rehydrating and delivering a racing a2a message", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passivation-race-"));
 		let releaseDispose!: () => void;
@@ -6053,6 +6146,8 @@ function makePersistedRlmDaemonFixture(
 		grandchildRuntimeGate?: Promise<void>;
 		childDisposeStarted?: () => void;
 		childDisposeGate?: Promise<void>;
+		childAdmissionStarted?: () => void;
+		childAdmissionGate?: Promise<void>;
 	} = {},
 ) {
 	const sessionDir = join(tempDir, "sessions");
@@ -6127,9 +6222,12 @@ function makePersistedRlmDaemonFixture(
 	);
 
 	const acceptAgentMessagePrompt = vi.fn(
-		(_message: string, options?: { preflightResult?: (didSucceed: boolean) => void }) => {
-			options?.preflightResult?.(true);
-			return Promise.resolve();
+		async (_message: string, promptOptions?: { preflightResult?: (didSucceed: boolean) => void }) => {
+			if (options.childAdmissionGate) {
+				options.childAdmissionStarted?.();
+				await options.childAdmissionGate;
+			}
+			promptOptions?.preflightResult?.(true);
 		},
 	);
 	const runtimeSessions: Array<ReturnType<typeof makeRuntimeSession>> = [];

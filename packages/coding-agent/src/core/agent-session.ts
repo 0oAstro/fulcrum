@@ -5288,6 +5288,10 @@ export class AgentSession {
 		});
 	}
 
+	get hasPendingAdmissionWaiters(): boolean {
+		return this._sessionActionCommitOwner !== undefined || this._sessionInputCheckpointWaiters.size > 0;
+	}
+
 	private _scheduleSessionInputPump(): void {
 		if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) return;
 		if (this._disposed || this._disposing || this._sessionInputPumpRequested || !this._hasSelectableSessionInput()) {

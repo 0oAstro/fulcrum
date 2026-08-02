@@ -2080,6 +2080,7 @@ export class AgentDaemon {
 				const persisted = (await this.readLatestRlmSubagentRegistry(parentState, true)).find(
 					(entry) => entry.childId === childId,
 				);
+				const childSessionFile = persisted?.sessionFile ?? state?.runtime.session.sessionFile;
 				// Persist the deletion boundary before tearing down the runtime. As with a
 				// resident child, deletion keeps its transcript and artifact tree on disk.
 				await this.recordRlmSubagentDeletion(parentState, childId);
@@ -2093,8 +2094,9 @@ export class AgentDaemon {
 				} finally {
 					await staleSession?.disposeAsync();
 				}
-				if (persisted && !state) {
-					this.cancelScheduledJobsForSessionFile(persisted.sessionFile);
+				// A killed close can join a passivation close that already skipped killed cleanup.
+				if (childSessionFile) {
+					this.cancelScheduledJobsForSessionFile(childSessionFile);
 				}
 			},
 			disposeRlmSubagentRuntimes: async () => {
@@ -2279,8 +2281,16 @@ export class AgentDaemon {
 					job.status !== "completed",
 			);
 		const passiveDescendants = passiveRlmSubagents ?? (await this.listPassiveRlmSubagents());
+		const hasPendingAdmission =
+			this.agentMessageAcceptingTargets.has(state.activeSessionId) ||
+			this.agentMessagePreparingTargets.has(state.activeSessionId) ||
+			this.agentMessageTargetLocks.has(state.activeSessionId) ||
+			[...this.promptAdmissions.values()].some(
+				(admission) => admission.activeSessionId === state.activeSessionId && admission.status !== "cancelled",
+			) ||
+			state.runtime.session.hasPendingAdmissionWaiters;
 		return {
-			isSessionActive: summary.isSessionActive || summary.hasRunningRlmChildren === true,
+			isSessionActive: summary.isSessionActive || summary.hasRunningRlmChildren === true || hasPendingAdmission,
 			attachedClients: state.clients.size,
 			hasRegisteredHeartbeat: jobs.some((job) => isHeartbeatCronJob(job) && job.status === "active"),
 			hasRegisteredCronJob: jobs.some((job) => !isHeartbeatCronJob(job)),
