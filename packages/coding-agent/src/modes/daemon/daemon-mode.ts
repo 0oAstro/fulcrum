@@ -121,6 +121,7 @@ import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import { encodePrivateFrame, PrivateFrameDecoder } from "../session-worker/private-framing.js";
 import {
 	type ActiveSessionState,
+	AmbiguousActiveSessionError,
 	createActiveSessionId,
 	type DaemonSocketClient,
 	resolveActiveSessionState,
@@ -1271,7 +1272,12 @@ export class AgentDaemon {
 			if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
 				throw new RuntimeOpenCancelledError();
 			}
-			return this.hydratePassiveRlmSubagent(passiveSubagent);
+			const state = await this.hydratePassiveRlmSubagent(passiveSubagent);
+			if (command.name) {
+				state.runtime.session.setSessionName(command.name);
+			}
+			this.adoptClientEnv(state, clientEnv);
+			return state;
 		}
 
 		// Hydration may have started while the async registry walk above was in
@@ -1923,9 +1929,12 @@ export class AgentDaemon {
 				() => this.getRunnableCronJob(job.id) !== undefined,
 			);
 			const passiveSubagent = await this.findPassiveRlmSubagent(job.sessionFile);
+			const resident = this.findSessionBySessionFile(job.sessionFile);
 			const childState = passiveSubagent
 				? await this.hydratePassiveRlmSubagent(passiveSubagent)
-				: this.findSessionBySessionFile(job.sessionFile);
+				: resident
+					? await this.waitForBoundSession(resident)
+					: undefined;
 			if (!childState || childState.runtime.metadata.kind !== "subagent") {
 				this.cancelRlmHeartbeat(job.id);
 				return undefined;
@@ -1934,7 +1943,7 @@ export class AgentDaemon {
 			const reboundJob = this.getRunnableCronJob(job.id);
 			return reboundJob && this.isCronJobRunnableForState(reboundJob, childState, true) ? childState : undefined;
 		} catch (error) {
-			if (error instanceof RuntimeOpenCancelledError) {
+			if (error instanceof RuntimeOpenCancelledError || error instanceof BoundSessionUnavailableError) {
 				return undefined;
 			}
 			throw error;
@@ -2030,15 +2039,10 @@ export class AgentDaemon {
 			return this.getBoundSessionState(id);
 		} catch (error) {
 			if (error instanceof BoundSessionUnavailableError) {
-				const closing = this.getSessionState(id);
-				const sessionFile = closing.runtime.session.sessionFile;
-				if (sessionFile && this.findPassivationBySessionFile(sessionFile)) {
-					await this.waitForPassivation(sessionFile);
-					const passive = await this.findPassiveRlmSubagent(sessionFile);
-					if (passive) return this.hydratePassiveRlmSubagent(passive);
-					return this.getOrHydrateBoundSessionState(id);
-				}
-				return this.waitForBoundSession(closing);
+				return this.waitForHydratingChild(this.getSessionState(id), id);
+			}
+			if (error instanceof AmbiguousActiveSessionError) {
+				throw error;
 			}
 			lookupError = error;
 		}
@@ -2050,9 +2054,24 @@ export class AgentDaemon {
 			(state) => state.runtime.metadata.kind === "subagent" && state.runtime.metadata.rlmChildId === id,
 		);
 		if (hydratingChild) {
-			return this.waitForBoundSession(hydratingChild);
+			return this.waitForHydratingChild(hydratingChild, id);
 		}
-		throw lookupError;
+		try {
+			return this.getBoundSessionState(id);
+		} catch (error) {
+			if (error instanceof AmbiguousActiveSessionError) throw error;
+			throw lookupError;
+		}
+	}
+
+	private async waitForHydratingChild(state: ActiveSessionState, selector: string): Promise<ActiveSessionState> {
+		const sessionFile = state.runtime.session.sessionFile;
+		if (!sessionFile || !this.findPassivationBySessionFile(sessionFile)) {
+			return this.waitForBoundSession(state);
+		}
+		await this.waitForPassivation(sessionFile);
+		const passive = await this.findPassiveRlmSubagent(sessionFile);
+		return passive ? this.hydratePassiveRlmSubagent(passive) : this.getOrHydrateBoundSessionState(selector);
 	}
 
 	private findRuntimeState(runtime: RlmSubagentRuntime): ActiveSessionState | undefined {
@@ -4603,6 +4622,7 @@ export class AgentDaemon {
 			if (error instanceof BoundSessionUnavailableError) {
 				targetState = await this.getOrHydrateBoundSessionState(targetSelector);
 			} else {
+				if (error instanceof AmbiguousActiveSessionError) throw error;
 				const passiveSubagent = await this.findPassiveRlmSubagent(targetSelector);
 				if (passiveSubagent) {
 					targetState = await this.hydratePassiveRlmSubagent(passiveSubagent);
@@ -4612,7 +4632,7 @@ export class AgentDaemon {
 							state.runtime.metadata.kind === "subagent" && state.runtime.metadata.rlmChildId === targetSelector,
 					);
 					if (hydratingChild) {
-						targetState = await this.waitForBoundSession(hydratingChild);
+						targetState = await this.waitForHydratingChild(hydratingChild, targetSelector);
 					} else if (this.options.worker && options.fromState) {
 						// The supervisor can resolve and wake a saved worker even when it is no longer
 						// present in this worker's resident peer snapshot.

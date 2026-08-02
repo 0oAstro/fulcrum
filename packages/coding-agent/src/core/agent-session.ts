@@ -9014,7 +9014,7 @@ export class AgentSession {
 		}
 		if (localMatches[0]) {
 			const subagent = localMatches[0];
-			const deletion = (async () => {
+			return this._trackRlmSubagentDeletion(subagent, async () => {
 				const listedAgents = await this._agentMessageController?.listAgents();
 				const listedSubagents = this._buildRlmSubagentList(listedAgents).subagents;
 				const passiveMatches = listedSubagents.filter(
@@ -9037,8 +9037,7 @@ export class AgentSession {
 						}
 					: subagent;
 				return this._deleteResolvedRlmSubagent(resolvedSubagent);
-			})();
-			return this._trackRlmSubagentDeletion(subagent, deletion);
+			});
 		}
 
 		const directMatches = [
@@ -9050,13 +9049,16 @@ export class AgentSession {
 			throw new Error(`RLM subagent selector "${target}" is ambiguous in the current parent session`);
 		}
 		const subagent = directMatches[0] ?? (await this._resolveDirectRlmSubagent(target));
-		return this._trackRlmSubagentDeletion(subagent, this._deleteResolvedRlmSubagent(subagent));
+		return this._trackRlmSubagentDeletion(subagent, () => this._deleteResolvedRlmSubagent(subagent));
 	}
 
 	private async _trackRlmSubagentDeletion(
 		subagent: RlmSubagentRegistryEntry,
-		deletion: Promise<RlmDeleteSubagentResult>,
+		startDeletion: () => Promise<RlmDeleteSubagentResult>,
 	): Promise<RlmDeleteSubagentResult> {
+		const existing = this._deletingRlmChildren.get(subagent.rlm_child_id);
+		if (existing) return existing.promise;
+		const deletion = Promise.resolve().then(startDeletion);
 		this._deletingRlmChildren.set(subagent.rlm_child_id, { subagent, promise: deletion });
 		try {
 			return await deletion;

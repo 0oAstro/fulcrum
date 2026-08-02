@@ -681,6 +681,53 @@ describe("AgentSession rlm recursion", () => {
 		expect(await root.listRlmSubagents()).toEqual({ subagents: [] });
 	});
 
+	it("coalesces concurrent deletion of the same passive daemon child", async () => {
+		let releaseListing!: () => void;
+		const listingGate = new Promise<void>((resolve) => {
+			releaseListing = resolve;
+		});
+		const deleteRlmSubagentRuntime = vi.fn(async () => {});
+		const root = createSession({
+			agentMessageController: {
+				listAgents: async () => {
+					await listingGate;
+					return {
+						current: { activeSessionId: "parent-active", sessionId: "parent-session" },
+						agents: [
+							{
+								activeSessionId: "passive-session",
+								sessionId: "passive-session",
+								sessionName: "passive-worker",
+								runtimeKind: "subagent" as const,
+								cwd: tempDir,
+								isStreaming: false,
+								unfinishedActionCount: 0,
+								parentActiveSessionId: "parent-active",
+								rlmChildId: "passive-child",
+								sessionDir: join(tempDir, "passive-child"),
+							},
+						],
+					};
+				},
+				sendAgentMessage: async () => {
+					throw new Error("unexpected send");
+				},
+			},
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => {
+					throw new Error("unexpected hydration");
+				},
+				deleteRlmSubagentRuntime,
+			},
+		});
+
+		const first = root.deleteRlmSubagent("passive-worker");
+		const second = root.deleteRlmSubagent("passive-worker");
+		releaseListing();
+		await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+		expect(deleteRlmSubagentRuntime).toHaveBeenCalledOnce();
+	});
+
 	it("disposes an inline child when setting its session name fails", async () => {
 		const root = createSession();
 		const appendSessionInfo = vi.spyOn(SessionManager.prototype, "appendSessionInfo").mockImplementation(() => {

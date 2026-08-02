@@ -66,6 +66,13 @@ export function createActiveSessionId(existingIds?: ActiveSessionIdIndex): strin
 	}
 }
 
+export class AmbiguousActiveSessionError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "AmbiguousActiveSessionError";
+	}
+}
+
 export function resolveActiveSessionState(
 	sessions: ReadonlyMap<string, ActiveSessionState>,
 	selector: string,
@@ -85,7 +92,7 @@ export function resolveActiveSessionState(
 		return exactMatches[0]!;
 	}
 	if (exactMatches.length > 1) {
-		throw new Error(formatAmbiguousSessionError(selector, exactMatches));
+		throw new AmbiguousActiveSessionError(formatAmbiguousSessionError(selector, exactMatches));
 	}
 
 	const suffixMatches = uniqueStates(
@@ -101,7 +108,7 @@ export function resolveActiveSessionState(
 		return suffixMatches[0]!;
 	}
 	if (suffixMatches.length > 1) {
-		throw new Error(formatAmbiguousSessionError(selector, suffixMatches));
+		throw new AmbiguousActiveSessionError(formatAmbiguousSessionError(selector, suffixMatches));
 	}
 
 	throw new Error(`Unknown active session: ${selector}`);
