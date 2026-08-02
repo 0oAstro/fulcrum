@@ -156,6 +156,141 @@ describe("loadEntriesFromFile", () => {
 	});
 });
 
+describe("session tree metadata", () => {
+	it("persists a derived depth and exposes parent linkage from the header", async () => {
+		const tempDir = join(tmpdir(), `session-tree-test-${Date.now()}-${Math.random()}`);
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const parent = SessionManager.create(tempDir, tempDir);
+			parent.newSession({ rlmDepth: 2 });
+			parent.flushNow();
+			const parentFile = parent.getSessionFile();
+			if (!parentFile) throw new Error("Missing parent session file");
+
+			const child = SessionManager.create(tempDir, tempDir);
+			child.newSession({ parentSession: parentFile });
+			child.flushNow();
+			const childFile = child.getSessionFile();
+			if (!childFile) throw new Error("Missing child session file");
+
+			const header = JSON.parse(readFileSync(childFile, "utf8").split("\n")[0] ?? "{}");
+			expect(header).toMatchObject({ parentSession: parentFile, rlmDepth: 3 });
+			expect(await readSessionInfo(childFile)).toMatchObject({
+				parentSessionPath: parentFile,
+				rlmDepth: 3,
+			});
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it.each([0, 2])("copies source depth %i across branch and fork reference edges", (depth) => {
+		const tempDir = join(tmpdir(), `session-reference-depth-test-${depth}-${Date.now()}-${Math.random()}`);
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const source = SessionManager.create(tempDir, tempDir);
+			source.newSession({ rlmDepth: depth });
+			const leafId = source.appendMessage({ role: "user", content: "fork here", timestamp: 1 });
+			source.flushNow();
+			const sourceFile = source.getSessionFile();
+			if (!sourceFile) throw new Error("Missing source session file");
+
+			const forked = SessionManager.forkFrom(sourceFile, tempDir, tempDir);
+			expect(forked.getHeader()?.rlmDepth).toBe(depth);
+
+			const branched = SessionManager.open(sourceFile, tempDir);
+			branched.createBranchedSession(leafId);
+			expect(branched.getHeader()?.rlmDepth).toBe(depth);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves unknown legacy depth across branch and fork reference edges", () => {
+		const tempDir = join(tmpdir(), `legacy-session-reference-depth-test-${Date.now()}-${Math.random()}`);
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const source = SessionManager.create(tempDir, tempDir);
+			source.newSession({ rlmDepth: undefined });
+			const leafId = source.appendMessage({ role: "user", content: "fork here", timestamp: 1 });
+			source.flushNow();
+			const sourceFile = source.getSessionFile();
+			if (!sourceFile) throw new Error("Missing source session file");
+
+			expect(SessionManager.forkFrom(sourceFile, tempDir, tempDir).getHeader()?.rlmDepth).toBeUndefined();
+			const branched = SessionManager.open(sourceFile, tempDir);
+			branched.createBranchedSession(leafId);
+			expect(branched.getHeader()?.rlmDepth).toBeUndefined();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("leaves derived child depth unknown when a legacy parent has no depth", () => {
+		const tempDir = join(tmpdir(), `legacy-parent-depth-test-${Date.now()}-${Math.random()}`);
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const parentFile = join(tempDir, "legacy-parent.jsonl");
+			writeFileSync(
+				parentFile,
+				`${JSON.stringify({ type: "session", id: "parent", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir })}\n`,
+			);
+			const child = SessionManager.create(tempDir, tempDir);
+			child.newSession({ parentSession: parentFile });
+			expect(child.getHeader()).toMatchObject({ parentSession: parentFile });
+			expect(child.getHeader()?.rlmDepth).toBeUndefined();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not invent root depth when materializing a legacy parent edge", () => {
+		const tempDir = join(tmpdir(), `materialized-legacy-depth-test-${Date.now()}-${Math.random()}`);
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const parentFile = join(tempDir, "legacy-parent.jsonl");
+			const session = SessionManager.inMemory(tempDir);
+			session.newSession({ parentSession: parentFile, rlmDepth: undefined });
+
+			const sessionFile = session.materializeSessionFile(tempDir);
+			const header = JSON.parse(readFileSync(sessionFile, "utf8").split("\n")[0] ?? "{}");
+			expect(header).toMatchObject({ parentSession: parentFile });
+			expect(header.rlmDepth).toBeUndefined();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("defaults legacy roots to depth zero and leaves legacy children for registry fallback", async () => {
+		const tempDir = join(tmpdir(), `legacy-session-tree-test-${Date.now()}-${Math.random()}`);
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const parentFile = join(tempDir, "parent.jsonl");
+			const childFile = join(tempDir, "child.jsonl");
+			writeFileSync(
+				parentFile,
+				`${JSON.stringify({ type: "session", id: "parent", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir })}\n`,
+			);
+			writeFileSync(
+				childFile,
+				`${JSON.stringify({
+					type: "session",
+					id: "child",
+					timestamp: "2025-01-01T00:00:01Z",
+					cwd: tempDir,
+					parentSession: parentFile,
+				})}\n`,
+			);
+
+			expect((await readSessionInfo(parentFile))?.rlmDepth).toBe(0);
+			expect(await readSessionInfo(childFile)).toMatchObject({ parentSessionPath: parentFile });
+			expect((await readSessionInfo(childFile))?.rlmDepth).toBeUndefined();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("findMostRecentSession", () => {
 	let tempDir: string;
 

@@ -3481,6 +3481,15 @@ describe("daemon mode helpers", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-lazy-rlm-list-"));
 		try {
 			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			// Simulate children written before rlmDepth was added to the extensible header.
+			// Their persisted registry rows remain the compatibility source after restart.
+			for (const sessionFile of [fixture.childSessionFile, fixture.grandchildSessionFile]) {
+				const lines = readFileSync(sessionFile, "utf8").split("\n");
+				const header = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+				delete header.rlmDepth;
+				lines[0] = JSON.stringify(header);
+				writeFileSync(sessionFile, lines.join("\n"));
+			}
 			const internals = fixture.daemon as unknown as {
 				sessions: Map<string, ActiveSessionState>;
 				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
@@ -3528,6 +3537,7 @@ describe("daemon mode helpers", () => {
 				parentActiveSessionId: parentState.activeSessionId,
 				rlmChildId: fixture.childId,
 				parentSessionPath: fixture.parentSessionFile,
+				rlmDepth: 1,
 			});
 			expect(passiveRow?.activeSessionId).toBeUndefined();
 			const nestedRow = listResponse.data.sessions.find(
@@ -3538,6 +3548,7 @@ describe("daemon mode helpers", () => {
 				runtimeKind: "subagent",
 				rlmChildId: fixture.grandchildId,
 				parentSessionPath: fixture.childSessionFile,
+				rlmDepth: 2,
 			});
 
 			const activeOnlyResponse = (await internals.handleCommand(

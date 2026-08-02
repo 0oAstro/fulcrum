@@ -141,7 +141,6 @@ import {
 	type DaemonCommand,
 	type DaemonOutbound,
 	type DaemonResponse,
-	type DaemonSavedSessionInfo,
 	type DaemonSessionClosedReason,
 	type DaemonSessionSnapshot,
 	type DaemonUpdateRestartManifest,
@@ -185,6 +184,7 @@ import {
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
+import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import {
 	createSnapshotTranscriptChunks,
 	SNAPSHOT_TARGET_CHUNK_BYTES,
@@ -1036,6 +1036,7 @@ export class AgentDaemon {
 					passive.entry.parentSessionFile ??
 					parentEntry?.sessionFile ??
 					passive.rootParentState.runtime.session.sessionFile,
+				rlmDepth: passive.info.rlmDepth ?? passive.entry.rlmDepth,
 				rlmChildId: passive.entry.childId,
 				rlmParentNodeId: passive.entry.rlmParentNodeId ?? passive.entry.childId,
 				spawnCode: passive.entry.spawnCode,
@@ -2101,7 +2102,10 @@ export class AgentDaemon {
 	): Promise<AgentSessionRuntime> {
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
 		if (options.parentSession.sessionFile) {
-			sessionManager.newSession({ parentSession: options.parentSession.sessionFile });
+			sessionManager.newSession({
+				parentSession: options.parentSession.sessionFile,
+				rlmDepth: options.rlmDepth,
+			});
 		}
 		let stateRef: ActiveSessionState | undefined;
 		// Subagents inherit the parent's client env (e.g. herdr pane identity).
@@ -2313,7 +2317,7 @@ export class AgentDaemon {
 							},
 						},
 						rlmSessionDir: entry.sessionDir,
-						rlmDepth: entry.rlmDepth ?? 1,
+						rlmDepth: entry.rlmDepth,
 						rlmMaxDepth: entry.rlmMaxDepth ?? 1,
 						rlmParentNodeId: entry.rlmParentNodeId ?? entry.childId,
 					},
@@ -5517,23 +5521,6 @@ function hasDaemonOutboundActiveSessionId(
 	message: DaemonOutbound,
 ): message is DaemonOutbound & { activeSessionId: string } {
 	return "activeSessionId" in message && typeof message.activeSessionId === "string";
-}
-
-function serializeSavedSessionInfo(session: SessionInfo): DaemonSavedSessionInfo {
-	return {
-		path: session.path,
-		id: session.id,
-		cwd: session.cwd,
-		name: session.name,
-		state: session.state,
-		parentSessionPath: session.parentSessionPath,
-		created: session.created.toISOString(),
-		modified: session.modified.toISOString(),
-		messageCount: session.messageCount,
-		firstMessage: session.firstMessage,
-		allMessagesText: session.allMessagesText,
-		agentStatus: session.agentStatus,
-	};
 }
 
 export function getChildActiveSessionStates(
