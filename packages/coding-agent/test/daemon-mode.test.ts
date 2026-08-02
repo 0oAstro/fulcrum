@@ -3145,7 +3145,7 @@ describe("daemon mode helpers", () => {
 		expect(client.snapshotActiveSessionIds).not.toContain("active");
 	});
 
-	it("falls back to a full replacement when snapshot cache creation fails", () => {
+	it("falls back to a full replacement when snapshot cache creation fails", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-daemon-replacement-fallback-"));
 		try {
 			const invalidAgentDir = join(root, "not-a-directory");
@@ -3174,10 +3174,10 @@ describe("daemon mode helpers", () => {
 				lastEventSequence: 0,
 			} as unknown as DaemonAttachResult;
 			const internals = daemon as unknown as {
-				createAttachResult: () => DaemonAttachResult;
+				createAttachResult: () => Promise<DaemonAttachResult>;
 				broadcastToSession(state: ActiveSessionState, message: unknown): void;
 			};
-			internals.createAttachResult = () => result;
+			internals.createAttachResult = async () => result;
 
 			internals.broadcastToSession(state, {
 				type: "session_replaced",
@@ -3186,11 +3186,11 @@ describe("daemon mode helpers", () => {
 				messages: [],
 			});
 
-			expect(write).toHaveBeenCalledTimes(2);
-			const replacementFrame = String(write.mock.calls[0]?.[0]);
-			expect(replacementFrame).toContain('"type":"session_replaced"');
-			expect(replacementFrame).toContain('"snapshotFollows":true');
-			expect(String(write.mock.calls[1]?.[0])).toContain('"type":"session_snapshot_begin"');
+			await vi.waitFor(() => expect(write).toHaveBeenCalled());
+			const frames = write.mock.calls.map((call) => String(call[0])).join("\n");
+			expect(frames).toContain('"type":"session_replaced"');
+			expect(frames).toContain('"snapshotFollows":true');
+			expect(frames).toContain('"type":"session_snapshot_begin"');
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -3496,6 +3496,9 @@ describe("daemon mode helpers", () => {
 				createAgentMessageController(
 					getCurrentState: () => ActiveSessionState | undefined,
 				): AgentSessionMessageController;
+				buildRlmChildSnapshotsWithPassiveRlmSubagents(
+					state: ActiveSessionState,
+				): Promise<NonNullable<DaemonAttachResult["snapshot"]["children"]>>;
 				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
 			};
 
@@ -3506,6 +3509,21 @@ describe("daemon mode helpers", () => {
 
 			expect(fixture.createRuntime).toHaveBeenCalledOnce();
 			expect([...internals.sessions.values()]).toEqual([parentState]);
+			const children = await internals.buildRlmChildSnapshotsWithPassiveRlmSubagents(parentState);
+			expect(children).toEqual([
+				expect.objectContaining({
+					id: fixture.childId,
+					status: "done",
+				}),
+				expect.objectContaining({
+					id: fixture.grandchildId,
+					parentId: fixture.childId,
+					status: "done",
+				}),
+			]);
+			expect(children.every((child) => child.activeSessionId === undefined)).toBe(true);
+			// Snapshotting must reuse the passive registry walk without hydrating children.
+			expect(fixture.createRuntime).toHaveBeenCalledOnce();
 			expect((await internals.createAgentMessageController(() => parentState).listAgents()).agents).toContainEqual(
 				expect.objectContaining({
 					activeSessionId: expect.any(String),

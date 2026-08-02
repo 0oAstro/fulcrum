@@ -67,7 +67,7 @@ import {
 	normalizeObserveLimit,
 	normalizeObserveMaxChars,
 } from "../../core/agent-observe.js";
-import type { AgentSession, PromptOptions } from "../../core/agent-session.js";
+import { type AgentSession, type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import {
 	AgentSessionRuntime,
@@ -110,7 +110,7 @@ import {
 	createAgentConnectionState,
 } from "../agent-connection/snapshot.js";
 import { createAgentConnectionToolDefinition } from "../agent-connection/tool-definition.js";
-import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
+import type { AgentConnectionHeartbeat, AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import { waitForHeadlessCompletion } from "../headless-completion.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import { encodePrivateFrame, PrivateFrameDecoder } from "../session-worker/private-framing.js";
@@ -1011,6 +1011,39 @@ export class AgentDaemon {
 		return new Map(
 			(await this.listPassiveRlmSubagents()).map((passive) => [resolve(passive.entry.sessionFile), passive]),
 		);
+	}
+
+	/** Add saved-only descendants discovered by the shared passive-registry walk. */
+	private async buildRlmChildSnapshotsWithPassiveRlmSubagents(
+		rootState: ActiveSessionState,
+	): Promise<AgentConnectionRlmChildAgentSnapshot[]> {
+		const snapshots = buildRlmChildSnapshots(rootState.activeSessionId, [...this.sessions.values()]);
+		const residentParentIds = new Set([
+			rootState.activeSessionId,
+			...snapshots.flatMap((snapshot) => (snapshot.activeSessionId ? [snapshot.activeSessionId] : [])),
+		]);
+		const seenChildIds = new Set(snapshots.map((snapshot) => snapshot.id));
+		for (const passive of await this.listPassiveRlmSubagents()) {
+			if (
+				!residentParentIds.has(passive.rootParentState.activeSessionId) ||
+				seenChildIds.has(passive.entry.childId)
+			) {
+				continue;
+			}
+			const parentEntry = passive.chain.at(-2);
+			const parentId = parentEntry?.childId ?? passive.rootParentState.runtime.metadata.rlmChildId;
+			snapshots.push({
+				id: passive.entry.childId,
+				...(parentId ? { parentId } : {}),
+				sessionName: passive.info.name ?? passive.entry.sessionName,
+				model: passive.entry.model ? `${passive.entry.model.provider}/${passive.entry.model.modelId}` : undefined,
+				label: rlmChildLabel(passive.entry.prompt ?? ""),
+				status: "done",
+				sessionDir: passive.entry.sessionDir,
+			});
+			seenChildIds.add(passive.entry.childId);
+		}
+		return snapshots;
 	}
 
 	private async buildSessionListWithPassiveRlmSubagents(
@@ -3050,7 +3083,7 @@ export class AgentDaemon {
 				client.attachedActiveSessionIds.add(state.activeSessionId);
 				let result: DaemonAttachResult;
 				try {
-					result = this.createAttachResult(client, state, command);
+					result = await this.createAttachResult(client, state, command);
 				} catch (error) {
 					state.clients.delete(client);
 					client.attachedActiveSessionIds.delete(state.activeSessionId);
@@ -3940,12 +3973,12 @@ export class AgentDaemon {
 		}
 	}
 
-	private createAttachResult(
+	private async createAttachResult(
 		client: DaemonSocketClient,
 		state: ActiveSessionState,
 		command: Extract<DaemonCommand, { type: "attach" }>,
-	): DaemonAttachResult {
-		const snapshot = this.createSessionSnapshot(state);
+	): Promise<DaemonAttachResult> {
+		const snapshot = await this.createSessionSnapshot(state);
 		const replay =
 			command.resumeCursor?.activeSessionId && command.resumeCursor.activeSessionId !== state.activeSessionId
 				? {
@@ -3978,7 +4011,7 @@ export class AgentDaemon {
 		};
 	}
 
-	private createSessionSnapshot(state: ActiveSessionState): DaemonSessionSnapshot {
+	private async createSessionSnapshot(state: ActiveSessionState): Promise<DaemonSessionSnapshot> {
 		const metadata = state.runtime.metadata;
 		const parent =
 			metadata.parentActiveSessionId || metadata.parentSessionId || metadata.rlmParentNodeId || metadata.rlmChildId
@@ -3989,7 +4022,7 @@ export class AgentDaemon {
 						...(metadata.rlmChildId ? { childId: metadata.rlmChildId } : {}),
 					}
 				: undefined;
-		const children = buildRlmChildSnapshots(state.activeSessionId, [...this.sessions.values()]);
+		const children = await this.buildRlmChildSnapshotsWithPassiveRlmSubagents(state);
 		const connectionState = this.createConnectionState(state);
 		return {
 			activeSessionId: state.activeSessionId,
@@ -5122,66 +5155,7 @@ export class AgentDaemon {
 				client.transport === "private-framed" &&
 				daemonClientCapabilitiesForSession(client, state.activeSessionId).has("chunked_snapshot")
 			) {
-				try {
-					const result = this.createAttachResult(client, state, {
-						type: "attach",
-						activeSessionId: state.activeSessionId,
-					});
-					const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
-					this.write(client, {
-						...sequencedMessage,
-						messages: [],
-						snapshotFollows: true,
-					});
-					const snapshotSignal = markClientSnapshotStreaming(client, state.activeSessionId);
-					let transcript: SnapshotTranscriptChunkSource;
-					try {
-						transcript = createSnapshotTranscriptChunks({
-							activeSessionId: state.activeSessionId,
-							snapshotId,
-							messages: result.snapshot.messages,
-							targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
-							signal: snapshotSignal,
-						});
-					} catch (error) {
-						finishClientSnapshotStreaming(client, state.activeSessionId);
-						throw error;
-					}
-					void this.streamWorkerSnapshot(
-						client,
-						{
-							...result,
-							messages: result.messages ? [] : undefined,
-							snapshot: { ...result.snapshot, messages: [] },
-							snapshotStream: {
-								id: snapshotId,
-								messageCount: result.snapshot.messages.length,
-								targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
-							},
-						},
-						transcript,
-						"replacement",
-						snapshotSignal,
-						true,
-					).catch((error) => {
-						this.log(`could not stream replacement snapshot: ${String(error)}`);
-						this.queueClientCatchup(client, state.activeSessionId, "replacement");
-						if (!client.snapshotStreaming) {
-							void this.catchUpBackpressuredClient(client).catch((catchupError) =>
-								this.log(`could not catch up replacement snapshot: ${String(catchupError)}`),
-							);
-						}
-					});
-				} catch (error) {
-					this.log(`could not prepare replacement snapshot: ${String(error)}`);
-					// Continue below with the complete replacement event.
-					if (client.transport === "private-framed") {
-						this.write(client, sequencedMessage);
-					} else {
-						serialized ??= serializeJsonLine(sequencedMessage);
-						this.writeSerialized(client, serialized, sequencedMessage);
-					}
-				}
+				this.beginReplacementSnapshot(client, state, sequencedMessage);
 				continue;
 			}
 			if (client.transport === "private-framed") {
@@ -5191,6 +5165,72 @@ export class AgentDaemon {
 				this.writeSerialized(client, serialized, sequencedMessage);
 			}
 		}
+	}
+
+	private beginReplacementSnapshot(
+		client: DaemonSocketClient,
+		state: ActiveSessionState,
+		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
+	): void {
+		const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+		// Mark before the registry read so later events queue behind this snapshot.
+		const snapshotSignal = markClientSnapshotStreaming(client, state.activeSessionId);
+		void this.prepareReplacementSnapshot(client, state, message, snapshotId, snapshotSignal).catch((error) => {
+			finishClientSnapshotStreaming(client, state.activeSessionId);
+			this.log(`could not prepare replacement snapshot: ${String(error)}`);
+			if (!client.socket.destroyed) this.write(client, message);
+			if (!client.snapshotStreaming && client.catchupActiveSessionIds?.size) {
+				void this.catchUpBackpressuredClient(client).catch((catchupError) =>
+					this.log(`could not catch up replacement snapshot: ${String(catchupError)}`),
+				);
+			}
+		});
+	}
+
+	private async prepareReplacementSnapshot(
+		client: DaemonSocketClient,
+		state: ActiveSessionState,
+		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
+		snapshotId: string,
+		snapshotSignal: AbortSignal,
+	): Promise<void> {
+		const result = await this.createAttachResult(client, state, {
+			type: "attach",
+			activeSessionId: state.activeSessionId,
+		});
+		const transcript = createSnapshotTranscriptChunks({
+			activeSessionId: state.activeSessionId,
+			snapshotId,
+			messages: result.snapshot.messages,
+			targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
+			signal: snapshotSignal,
+		});
+		this.write(client, { ...message, messages: [], snapshotFollows: true });
+		void this.streamWorkerSnapshot(
+			client,
+			{
+				...result,
+				messages: result.messages ? [] : undefined,
+				snapshot: { ...result.snapshot, messages: [] },
+				snapshotStream: {
+					id: snapshotId,
+					messageCount: result.snapshot.messages.length,
+					targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
+				},
+			},
+			transcript,
+			"replacement",
+			snapshotSignal,
+			true,
+		).catch((error) => {
+			this.log(`could not stream replacement snapshot: ${String(error)}`);
+			this.queueClientCatchup(client, state.activeSessionId, "replacement");
+			if (!client.snapshotStreaming) {
+				void this.catchUpBackpressuredClient(client).catch((catchupError) =>
+					this.log(`could not catch up replacement snapshot: ${String(catchupError)}`),
+				);
+			}
+		});
 	}
 
 	private broadcastGlobal(message: DaemonOutbound): void {
@@ -5262,7 +5302,7 @@ export class AgentDaemon {
 			if (!state || !state.clients.has(client)) {
 				continue;
 			}
-			const result = this.createAttachResult(client, state, {
+			const result = await this.createAttachResult(client, state, {
 				type: "attach",
 				activeSessionId,
 			});
