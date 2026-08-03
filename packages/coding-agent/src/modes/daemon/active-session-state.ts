@@ -33,6 +33,8 @@ export interface ActiveSessionState {
 	activeSessionId: string;
 	runtime: AgentSessionRuntime;
 	clients: Set<DaemonSocketClient>;
+	/** Attach snapshots in flight: reserved for passivation busyness, but not yet event recipients. */
+	pendingAttaches: number;
 	extensionUiRequests: Map<string, ActiveSessionExtensionUiRequest>;
 	eventGeneration: string;
 	lastEventSequence: DaemonEventSequence;

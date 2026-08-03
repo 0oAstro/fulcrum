@@ -94,4 +94,20 @@ describe("SettingsSelectorComponent", () => {
 
 		expect(onIdleEvictionMinutesChange).toHaveBeenCalledWith(180);
 	});
+
+	test.each([0.5, 1.5])("round-trips a fractional idle eviction value of %s", (value) => {
+		const onIdleEvictionMinutesChange = vi.fn();
+		const component = new SettingsSelectorComponent(
+			{ ...config, idleEvictionMinutes: value },
+			{ ...callbacks, onIdleEvictionMinutesChange },
+		);
+		const list = component.getSettingsList();
+		for (const character of "idle") list.handleInput(character);
+
+		// Cycle through every option and back onto the custom fractional value.
+		for (let index = 0; index < 7; index++) list.handleInput("\r");
+
+		expect(onIdleEvictionMinutesChange).toHaveBeenLastCalledWith(value);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain(String(value));
+	});
 });

@@ -1989,9 +1989,14 @@ export class AgentSession {
 				maxDepth: command.maxDepth,
 			});
 			if (command.global) {
+				await this.settingsManager.flush();
+				const staleErrors = this.settingsManager.drainErrors("global");
+				for (const { error } of staleErrors) {
+					console.warn(`Warning: Earlier global settings write failed: ${error.message}`);
+				}
 				this.settingsManager.setRlmMaxDepth(command.maxDepth);
 				await this.settingsManager.flush();
-				const errors = this.settingsManager.drainErrors().filter((error) => error.scope === "global");
+				const errors = this.settingsManager.drainErrors("global");
 				globalError = errors.map(({ error }) => error.message).join("; ") || undefined;
 			}
 			this._rlmMaxDepth = command.maxDepth;

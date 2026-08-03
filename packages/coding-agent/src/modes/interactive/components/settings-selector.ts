@@ -456,7 +456,7 @@ export class SettingsSelectorComponent extends Container {
 						callbacks.onAutoCompactChange(newValue === "true");
 						break;
 					case "idle-eviction-minutes":
-						callbacks.onIdleEvictionMinutesChange(newValue === "off" ? "off" : parseInt(newValue, 10));
+						callbacks.onIdleEvictionMinutesChange(newValue === "off" ? "off" : Number(newValue));
 						break;
 					case "show-images":
 						callbacks.onShowImagesChange(newValue === "true");

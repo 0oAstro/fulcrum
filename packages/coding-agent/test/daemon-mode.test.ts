@@ -3288,6 +3288,40 @@ describe("daemon mode helpers", () => {
 		expect(client.attachedActiveSessionIds).toContain(state.activeSessionId);
 	});
 
+	it("rejects an attach when its session closes during snapshot creation", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const state = makeState("active");
+		const client = makeClient("client-1", state.activeSessionId);
+		client.attachedActiveSessionIds.clear();
+		let releaseSnapshot!: () => void;
+		const snapshotGate = new Promise<void>((resolve) => {
+			releaseSnapshot = resolve;
+		});
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAttachResult: ReturnType<typeof vi.fn>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.createAttachResult = vi.fn(async () => {
+			await snapshotGate;
+			return { activeSessionId: state.activeSessionId, snapshot: {}, lastEventSequence: 0 };
+		});
+
+		const attach = internals.handleCommand(client, { type: "attach", activeSessionId: state.activeSessionId });
+		await vi.waitFor(() => expect(state.pendingAttaches).toBe(1));
+		internals.sessions.delete(state.activeSessionId);
+		releaseSnapshot();
+
+		await expect(attach).rejects.toThrow(`Active session ${state.activeSessionId} closed during attach`);
+		expect(state.pendingAttaches).toBe(0);
+		expect(state.clients).not.toContain(client);
+		expect(client.attachedActiveSessionIds).not.toContain(state.activeSessionId);
+	});
+
 	it("drops a backpressure catch-up when the client detaches during snapshot creation", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
@@ -4090,14 +4124,60 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("retries advertised session ID resolution after a concurrent passive hydration", async () => {
+	it("loads a passive child under the create command client env", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-create-env-"));
+		const inheritedPaneId = process.env.HERDR_PANE_ID;
+		delete process.env.HERDR_PANE_ID;
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const envAtRuntimeCreation: Array<string | undefined> = [];
+			const createRuntime = fixture.createRuntime.getMockImplementation();
+			if (!createRuntime) throw new Error("Missing fixture runtime factory");
+			fixture.createRuntime.mockImplementation(async (runtimeOptions) => {
+				envAtRuntimeCreation.push(process.env.HERDR_PANE_ID);
+				return createRuntime(runtimeOptions);
+			});
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			expect(parentState.clientEnv).toBeUndefined();
+
+			const childState = await internals.createRuntime({
+				type: "create",
+				sessionPath: fixture.childSessionFile,
+				env: { HERDR_PANE_ID: "pane-42" },
+			});
+
+			expect(envAtRuntimeCreation).toEqual([undefined, "pane-42"]);
+			expect(parentState.clientEnv).toEqual({ HERDR_PANE_ID: "pane-42" });
+			expect(childState.clientEnv).toEqual({ HERDR_PANE_ID: "pane-42" });
+		} finally {
+			if (inheritedPaneId === undefined) delete process.env.HERDR_PANE_ID;
+			else process.env.HERDR_PANE_ID = inheritedPaneId;
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("joins binding when advertised session ID resolution races passive hydration", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-lazy-rlm-resolve-race-"));
 		let releasePassiveList!: () => void;
 		const passiveListGate = new Promise<void>((resolve) => {
 			releasePassiveList = resolve;
 		});
+		let releaseBinding!: () => void;
+		const bindingGate = new Promise<void>((resolve) => {
+			releaseBinding = resolve;
+		});
+		let markBindingStarted!: () => void;
+		const bindingStarted = new Promise<void>((resolve) => {
+			markBindingStarted = resolve;
+		});
 		try {
-			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const fixture = makePersistedRlmDaemonFixture(tempDir, {
+				childBindingStarted: markBindingStarted,
+				childBindingGate: bindingGate,
+			});
 			const internals = fixture.daemon as unknown as {
 				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
 				getOrHydrateBoundSessionState(id: string): Promise<ActiveSessionState>;
@@ -4107,23 +4187,33 @@ describe("daemon mode helpers", () => {
 			const childInfo = await readSessionInfo(fixture.childSessionFile);
 			if (!childInfo) throw new Error("Missing child session info");
 			const listPassive = internals.listPassiveRlmSubagents.bind(fixture.daemon);
-			let releaseBlockedList = false;
+			let blockNextList = true;
 			internals.listPassiveRlmSubagents = vi.fn(async () => {
-				if (!releaseBlockedList) {
-					releaseBlockedList = true;
+				if (blockNextList) {
+					blockNextList = false;
 					await passiveListGate;
 				}
 				return listPassive();
 			});
 
-			const advertisedLookup = internals.getOrHydrateBoundSessionState(childInfo.id);
+			let advertisedResolved = false;
+			const advertisedLookup = internals.getOrHydrateBoundSessionState(childInfo.id).then((state) => {
+				advertisedResolved = true;
+				return state;
+			});
 			await Promise.resolve();
-			const hydrated = await internals.getOrHydrateBoundSessionState(fixture.childId);
+			const hydration = internals.getOrHydrateBoundSessionState(fixture.childId);
+			await bindingStarted;
 			releasePassiveList();
+			await Promise.resolve();
+			expect(advertisedResolved).toBe(false);
+			releaseBinding();
 
+			const hydrated = await hydration;
 			await expect(advertisedLookup).resolves.toBe(hydrated);
 		} finally {
 			releasePassiveList();
+			releaseBinding();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -4258,6 +4348,50 @@ describe("daemon mode helpers", () => {
 			).toHaveBeenCalledWith(fixture.grandchildId, grandchildState.runtime.session);
 		} finally {
 			releaseHydration();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a child resident while an attach snapshot is in flight", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-attach-passivation-race-"));
+		let releaseSnapshot!: () => void;
+		const snapshotGate = new Promise<void>((resolve) => {
+			releaseSnapshot = resolve;
+		});
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createAttachResult: ReturnType<typeof vi.fn>;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+				passivateIdleChildren(threshold: number, now: number, limit: number): Promise<number>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			const client = makeClient("attach-client", childState.activeSessionId);
+			client.attachedActiveSessionIds.clear();
+			internals.createAttachResult = vi.fn(async () => {
+				await snapshotGate;
+				return { activeSessionId: childState.activeSessionId, snapshot: {}, lastEventSequence: 0 };
+			});
+
+			const attach = internals.handleCommand(client, {
+				type: "attach",
+				activeSessionId: childState.activeSessionId,
+			});
+			await vi.waitFor(() => expect(childState.pendingAttaches).toBe(1));
+			await expect(internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1)).resolves.toBe(0);
+			expect(internals.sessions.get(childState.activeSessionId)).toBe(childState);
+			expect(parentState.runtime.session.releaseFinishedRlmChildSession).not.toHaveBeenCalled();
+
+			releaseSnapshot();
+			await attach;
+			expect(childState.pendingAttaches).toBe(0);
+			expect(childState.clients).toContain(client);
+			expect(client.attachedActiveSessionIds).toContain(childState.activeSessionId);
+		} finally {
+			releaseSnapshot();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -6746,6 +6880,7 @@ function makeState(activeSessionId: string, parentActiveSessionId?: string): Act
 	return {
 		activeSessionId,
 		clients: new Set(),
+		pendingAttaches: 0,
 		lastEventSequence: 0,
 		runtime: {
 			metadata: {

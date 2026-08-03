@@ -1055,6 +1055,52 @@ describe("AgentSession rlm recursion", () => {
 		expect(globalSettings).toBe(JSON.stringify({ rlmMaxDepth: 1 }));
 	});
 
+	it("does not attribute stale errors to a successful global max-depth write", async () => {
+		const writes: Record<"global" | "project", string | undefined> = {
+			global: JSON.stringify({ rlmMaxDepth: 1 }),
+			project: undefined,
+		};
+		let failGlobal = true;
+		let failProject = true;
+		const storage: SettingsStorage = {
+			withLock(scope, update) {
+				const next = update(writes[scope]);
+				if (scope === "global" && failGlobal && next !== undefined) {
+					throw new Error("stale global failure");
+				}
+				if (scope === "project" && failProject && next !== undefined) {
+					throw new Error("project warning");
+				}
+				writes[scope] = next;
+			},
+		};
+		const settingsManager = SettingsManager.fromStorage(storage);
+		settingsManager.setDefaultModelAndProvider("provider", "model");
+		await settingsManager.flush();
+		settingsManager.setProjectExtensionPaths(["broken-project-extension"]);
+		await settingsManager.flush();
+		// Preserve the queued project diagnostic while recovering the global store.
+		failGlobal = false;
+		failProject = false;
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const current = createSession({ settingsManager });
+
+		await current.prompt("/rlm-max-depth 5 --global");
+
+		expect(
+			findLastMessage(
+				current.messages,
+				(message) => message.role === "custom" && message.customType === "rlm_max_depth_status",
+			),
+		).toMatchObject({ details: { maxDepth: 5, source: "chat", globalUpdated: true } });
+		expect(warn).toHaveBeenCalledWith("Warning: Earlier global settings write failed: stale global failure");
+		expect(settingsManager.drainErrors()).toMatchObject([
+			{ scope: "project", error: { message: "project warning" } },
+		]);
+		expect(JSON.parse(writes.global ?? "{}")).toMatchObject({ rlmMaxDepth: 5 });
+		warn.mockRestore();
+	});
+
 	it("rolls back max-depth state when chat persistence fails", async () => {
 		const root = createSession();
 		const originalPrompt = root.systemPrompt;

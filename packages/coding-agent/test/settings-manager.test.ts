@@ -316,6 +316,15 @@ describe("SettingsManager", () => {
 			expect(errors.map((e) => e.scope).sort()).toEqual(["global", "project"]);
 			expect(manager.drainErrors()).toEqual([]);
 		});
+
+		it("drains only the requested scope", () => {
+			writeFileSync(join(agentDir, "settings.json"), "{ invalid global json");
+			writeFileSync(join(projectDir, ".prime", "agent", "settings.json"), "{ invalid project json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.drainErrors("global").map((entry) => entry.scope)).toEqual(["global"]);
+			expect(manager.drainErrors().map((entry) => entry.scope)).toEqual(["project"]);
+		});
 	});
 
 	describe("project settings directory creation", () => {

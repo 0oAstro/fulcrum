@@ -1124,6 +1124,7 @@ export class AgentDaemon {
 					: createActiveSessionId(this.sessions),
 			runtime,
 			clients: new Set(),
+			pendingAttaches: 0,
 			extensionUiRequests: new Map(),
 			eventGeneration: createActiveSessionId(),
 			lastEventSequence: 0,
@@ -1272,6 +1273,7 @@ export class AgentDaemon {
 			if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
 				throw new RuntimeOpenCancelledError();
 			}
+			this.adoptClientEnv(passiveSubagent.rootParentState, clientEnv);
 			const state = await this.hydratePassiveRlmSubagent(passiveSubagent);
 			if (command.name) {
 				state.runtime.session.setSessionName(command.name);
@@ -2059,6 +2061,9 @@ export class AgentDaemon {
 		try {
 			return this.getBoundSessionState(id);
 		} catch (error) {
+			if (error instanceof BoundSessionUnavailableError) {
+				return this.waitForHydratingChild(this.getSessionState(id), id);
+			}
 			if (error instanceof AmbiguousActiveSessionError) throw error;
 			throw lookupError;
 		}
@@ -2308,7 +2313,7 @@ export class AgentDaemon {
 			state.runtime.session.hasPendingAdmissionWaiters;
 		return {
 			isSessionActive: summary.isSessionActive || summary.hasRunningRlmChildren === true || hasPendingAdmission,
-			attachedClients: state.clients.size,
+			attachedClients: state.clients.size + state.pendingAttaches,
 			hasRegisteredHeartbeat: jobs.some((job) => isHeartbeatCronJob(job) && job.status === "active"),
 			hasRegisteredCronJob: jobs.some((job) => !isHeartbeatCronJob(job)),
 			lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
@@ -3263,14 +3268,25 @@ export class AgentDaemon {
 					? markClientSnapshotStreaming(client, state.activeSessionId)
 					: undefined;
 				let result: DaemonAttachResult;
+				state.pendingAttaches++;
 				try {
 					result = await this.createAttachResult(client, state, command);
+					if (
+						this.sessions.get(state.activeSessionId) !== state ||
+						this.closingSessions.has(state.activeSessionId)
+					) {
+						throw new BoundSessionUnavailableError(
+							`Active session ${state.activeSessionId} closed during attach`,
+						);
+					}
 				} catch (error) {
 					removeDaemonClientSessionCapabilities(client, state.activeSessionId);
 					if (streamsSnapshot) {
 						finishClientSnapshotStreaming(client, state.activeSessionId);
 					}
 					throw error;
+				} finally {
+					state.pendingAttaches--;
 				}
 				state.clients.add(client);
 				client.attachedActiveSessionIds.add(state.activeSessionId);
