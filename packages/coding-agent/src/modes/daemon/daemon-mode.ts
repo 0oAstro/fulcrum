@@ -336,6 +336,10 @@ const RECOVERY_CHECKPOINT_EVENTS: ReadonlySet<string> = new Set([
 	"rlm_child_update",
 ]);
 
+function validRlmDepthOrUndefined(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
 function delay(ms: number): Promise<void> {
 	return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
@@ -2558,7 +2562,10 @@ export class AgentDaemon {
 							},
 						},
 						rlmSessionDir: entry.sessionDir,
-						rlmDepth: entry.rlmDepth ?? 1,
+						// Registry depth is authoritative (written at spawn); for legacy entries
+						// without it, the persisted header must win over the depth-1 default so
+						// nested legacy children do not wake shallower than persisted.
+						rlmDepth: entry.rlmDepth ?? validRlmDepthOrUndefined(sessionManager.getHeader()?.rlmDepth) ?? 1,
 						rlmMaxDepth: entry.rlmMaxDepth,
 						rlmParentNodeId: entry.rlmParentNodeId ?? entry.childId,
 					},

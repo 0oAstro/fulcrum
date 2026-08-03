@@ -4101,6 +4101,44 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("prefers the persisted header depth when a legacy registry entry lacks one", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-legacy-header-depth-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const childLines = readFileSync(fixture.childSessionFile, "utf8").split("\n");
+			const childHeader = JSON.parse(childLines[0] ?? "{}") as Record<string, unknown>;
+			childHeader.rlmDepth = 2;
+			childLines[0] = JSON.stringify(childHeader);
+			writeFileSync(fixture.childSessionFile, childLines.join("\n"));
+
+			const registryPath = join(fixture.parentArtifactDir, "rlm-subagents.jsonl");
+			const registryEntry = JSON.parse(readFileSync(registryPath, "utf8").trim()) as Record<string, unknown>;
+			delete registryEntry.rlmDepth;
+			writeFileSync(registryPath, `${JSON.stringify(registryEntry)}\n`);
+
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createAgentMessageController(
+					getCurrentState: () => ActiveSessionState | undefined,
+				): AgentSessionMessageController;
+			};
+			const parentState = await internals.createRuntime({
+				type: "create",
+				sessionPath: fixture.parentSessionFile,
+			});
+
+			await internals
+				.createAgentMessageController(() => parentState)
+				.sendAgentMessage({ target: "renamed-worker", message: "report progress" });
+
+			// The nested header depth must win over the legacy depth-1 default so the
+			// woken child does not come up shallower than persisted.
+			expect(fixture.createRuntime.mock.calls[1]?.[0].sessionOptions?.rlmDepth).toBe(2);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("hydrates only the ancestor chain when a nested passive child is messaged", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-lazy-nested-message-"));
 		try {
