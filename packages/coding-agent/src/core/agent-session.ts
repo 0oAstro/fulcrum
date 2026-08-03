@@ -1520,10 +1520,7 @@ export class AgentSession {
 			return { maxDepth: this._configuredRlmMaxDepth, source: "inherited" };
 		}
 		const global = this.settingsManager.getRlmMaxDepth();
-		if (global !== undefined) {
-			if (!isNonNegativeInteger(global)) {
-				throw new Error("The rlmMaxDepth setting must be a non-negative integer");
-			}
+		if (global !== undefined && isNonNegativeInteger(global)) {
 			return { maxDepth: global, source: "global" };
 		}
 		const env = process.env.RLM_MAX_DEPTH;
@@ -1952,11 +1949,13 @@ export class AgentSession {
 		return { kind: "set", maxDepth, global };
 	}
 
-	private _emitRlmMaxDepthStatus(globalUpdated = false): void {
+	private _emitRlmMaxDepthStatus(globalUpdated = false, globalError?: string): void {
 		let content = `RLM max depth: ${this._rlmMaxDepth} (source: ${this._rlmMaxDepthSource}).`;
 		if (globalUpdated) {
 			content +=
 				" Saved for this chat and as the global default for new sessions; other existing sessions are unchanged.";
+		} else if (globalError) {
+			content += ` Global default was not saved: ${globalError}`;
 		}
 		const message = {
 			role: "custom" as const,
@@ -1984,19 +1983,23 @@ export class AgentSession {
 	private async _handleRlmMaxDepthSlashCommand(text: string): Promise<boolean> {
 		const command = this._parseRlmMaxDepthSlashCommand(text);
 		if (!command) return false;
+		let globalError: string | undefined;
 		if (command.kind === "set") {
+			this.sessionManager.appendCustomEntryWithRollback(RLM_MAX_DEPTH_STATE_CUSTOM_TYPE, {
+				maxDepth: command.maxDepth,
+			});
 			if (command.global) {
 				this.settingsManager.setRlmMaxDepth(command.maxDepth);
 				await this.settingsManager.flush();
+				const errors = this.settingsManager.drainErrors().filter((error) => error.scope === "global");
+				globalError = errors.map(({ error }) => error.message).join("; ") || undefined;
 			}
 			this._rlmMaxDepth = command.maxDepth;
 			this._rlmMaxDepthSource = "chat";
-			this.sessionManager.appendCustomEntry(RLM_MAX_DEPTH_STATE_CUSTOM_TYPE, { maxDepth: command.maxDepth });
-			this.sessionManager.flushNow();
 			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 			this.agent.state.systemPrompt = this._baseSystemPrompt;
 		}
-		this._emitRlmMaxDepthStatus(command.kind === "set" && command.global);
+		this._emitRlmMaxDepthStatus(command.kind === "set" && command.global && !globalError, globalError);
 		return true;
 	}
 

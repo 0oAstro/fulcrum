@@ -1,5 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Agent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
@@ -24,7 +25,7 @@ import {
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
 import { SessionManager } from "../src/core/session-manager.js";
-import { SettingsManager } from "../src/core/settings-manager.js";
+import { SettingsManager, type SettingsStorage } from "../src/core/settings-manager.js";
 import type { Skill } from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 import { createTestResourceLoader } from "./utilities.js";
@@ -1027,6 +1028,84 @@ describe("AgentSession rlm recursion", () => {
 		existing.dispose();
 	});
 
+	it("does not claim a failed global max-depth write was saved", async () => {
+		const globalSettings = JSON.stringify({ rlmMaxDepth: 1 });
+		const storage: SettingsStorage = {
+			withLock(scope, update) {
+				const current = scope === "global" ? globalSettings : undefined;
+				const next = update(current);
+				if (scope === "global" && next !== undefined) {
+					throw new Error("EROFS: read-only file system");
+				}
+			},
+		};
+		const current = createSession({ settingsManager: SettingsManager.fromStorage(storage) });
+
+		await current.prompt("/rlm-max-depth 5 --global");
+
+		const status = findLastMessage(
+			current.messages,
+			(message) => message.role === "custom" && message.customType === "rlm_max_depth_status",
+		);
+		expect(status).toMatchObject({
+			content: "RLM max depth: 5 (source: chat). Global default was not saved: EROFS: read-only file system",
+			details: { maxDepth: 5, source: "chat", globalUpdated: false },
+		});
+		expect(SettingsManager.fromStorage(storage).getRlmMaxDepth()).toBe(1);
+		expect(globalSettings).toBe(JSON.stringify({ rlmMaxDepth: 1 }));
+	});
+
+	it("rolls back max-depth state when chat persistence fails", async () => {
+		const root = createSession();
+		const originalPrompt = root.systemPrompt;
+		const flush = vi.spyOn(root.sessionManager, "flushNow").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+
+		await expect(root.promptAndWait("/rlm-max-depth 0")).rejects.toThrow("disk full");
+		expect(root.rlmMaxDepth).toBe(1);
+		expect(root.systemPrompt).toBe(originalPrompt);
+		expect(
+			root.sessionManager
+				.getBranch()
+				.some((entry) => entry.type === "custom" && entry.customType === "rlm_max_depth_state"),
+		).toBe(false);
+
+		flush.mockRestore();
+		root.sessionManager.flushNow();
+		expect(readFileSync(root.sessionFile!, "utf8")).not.toContain('"customType":"rlm_max_depth_state"');
+	});
+
+	it("falls through an invalid global max depth while navigating off a chat override", async () => {
+		const original = createSession();
+		await original.prompt("baseline branch");
+		await original.agent.waitForIdle();
+		const baselineLeafId = original.sessionManager.getLeafId();
+		if (!baselineLeafId) throw new Error("Missing baseline branch leaf");
+		await original.prompt("/rlm-max-depth 2");
+		const sessionFile = original.sessionFile;
+		if (!sessionFile) throw new Error("Missing persisted session file");
+		original.dispose();
+
+		vi.stubEnv("RLM_MAX_DEPTH", "0");
+		try {
+			const resumed = createSession({
+				sessionManager: SessionManager.open(sessionFile, join(tempDir, "sessions")),
+				settingsManager: SettingsManager.inMemory({ rlmMaxDepth: -1 }),
+			});
+			expect(resumed.rlmMaxDepth).toBe(2);
+
+			await expect(resumed.navigateTree(baselineLeafId, { summarize: false })).resolves.toMatchObject({
+				cancelled: false,
+			});
+			expect(resumed.sessionManager.getLeafId()).toBe(baselineLeafId);
+			expect(resumed.rlmMaxDepth).toBe(0);
+			expect(resumed.systemPrompt).not.toContain("A callable `rlm`");
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
 	it("keeps a spawned child's chat override when reconstructed with its inherited config", async () => {
 		const root = createSession({ maxDepth: 2 });
 		const childResult = await root.runRlmChild("child with a durable override");
@@ -1083,6 +1162,24 @@ describe("AgentSession rlm recursion", () => {
 			"RLM recursion depth limit reached (RLM_DEPTH=0, RLM_MAX_DEPTH=0)",
 		);
 		expect(child.rlmMaxDepth).toBe(3);
+	});
+
+	it("lets a stale kernel depth cap defer to the live host gate", () => {
+		const python =
+			process.env.PRIME_AGENT_KERNEL_PYTHON ?? join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
+		const runtime = join(process.cwd(), "..", "..", "prime-agent-runtime", "src");
+		const probe = spawnSync(
+			python,
+			["-c", "import asyncio, rlm; rlm.Comm = None; asyncio.run(rlm.run('raised live cap'))"],
+			{
+				env: { ...process.env, PYTHONPATH: runtime, RLM_DEPTH: "1", RLM_MAX_DEPTH: "1" },
+				encoding: "utf8",
+			},
+		);
+
+		expect(probe.status).not.toBe(0);
+		expect(probe.stderr).toContain("Jupyter comm support is unavailable in this kernel");
+		expect(probe.stderr).not.toContain("RLM recursion depth limit reached");
 	});
 
 	it("rejects child creation at the configured recursion depth cap", async () => {
