@@ -483,6 +483,58 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("persists explicit child depth for an in-memory daemon parent", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-in-memory-parent-depth-"));
+		try {
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => ({
+				session: makeRuntimeSession(options.sessionManager),
+				extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+					ReturnType<CreateAgentSessionRuntimeFactory>
+				>["extensionsResult"],
+				services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+					ReturnType<CreateAgentSessionRuntimeFactory>
+				>["services"],
+				diagnostics: [],
+			}));
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
+				createRuntime,
+			});
+			const internals = daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createRlmSubagentRuntime(
+					parentState: ActiveSessionState,
+					options: CreateRlmSubagentRuntimeOptions,
+				): Promise<ActiveSessionState["runtime"]>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", noSession: true });
+			const child = await internals.createRlmSubagentRuntime(parentState, {
+				parentSession: parentState.runtime.session,
+				id: "child-1",
+				prompt: "persist depth",
+				sessionName: "depth-child",
+				sessionDir: join(tempDir, "child"),
+				model: {} as Model<Api>,
+				thinkingLevel: "off",
+				serviceTier: null,
+				scopedModels: [],
+				activeToolNames: [],
+				customTools: [],
+				includeGoals: false,
+				includeCompactSkill: false,
+				rlmDepth: 1,
+				rlmMaxDepth: 2,
+				rlmParentNodeId: "child-1",
+			});
+
+			expect(parentState.runtime.session.sessionFile).toBeUndefined();
+			expect(child.session.sessionManager.getHeader()).toMatchObject({ rlmDepth: 1 });
+			expect(child.session.sessionManager.getHeader()?.parentSession).toBeUndefined();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("defers RLM heartbeats while a subagent is binding", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-binding-heartbeat-"));
 		let releaseChildBinding: (() => void) | undefined;
@@ -3938,6 +3990,42 @@ describe("daemon mode helpers", () => {
 			expect(
 				[...internals.sessions.values()].filter((state) => state.runtime.metadata.kind === "subagent"),
 			).toHaveLength(1);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rehydrates a legacy passive subagent at depth one", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-legacy-rlm-depth-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const childLines = readFileSync(fixture.childSessionFile, "utf8").split("\n");
+			const childHeader = JSON.parse(childLines[0] ?? "{}") as Record<string, unknown>;
+			delete childHeader.rlmDepth;
+			childLines[0] = JSON.stringify(childHeader);
+			writeFileSync(fixture.childSessionFile, childLines.join("\n"));
+
+			const registryPath = join(fixture.parentArtifactDir, "rlm-subagents.jsonl");
+			const registryEntry = JSON.parse(readFileSync(registryPath, "utf8").trim()) as Record<string, unknown>;
+			delete registryEntry.rlmDepth;
+			writeFileSync(registryPath, `${JSON.stringify(registryEntry)}\n`);
+
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createAgentMessageController(
+					getCurrentState: () => ActiveSessionState | undefined,
+				): AgentSessionMessageController;
+			};
+			const parentState = await internals.createRuntime({
+				type: "create",
+				sessionPath: fixture.parentSessionFile,
+			});
+
+			await internals
+				.createAgentMessageController(() => parentState)
+				.sendAgentMessage({ target: "renamed-worker", message: "report progress" });
+
+			expect(fixture.createRuntime.mock.calls[1]?.[0].sessionOptions?.rlmDepth).toBe(1);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
