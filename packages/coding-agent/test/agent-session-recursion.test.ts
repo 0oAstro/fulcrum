@@ -308,6 +308,24 @@ describe("AgentSession rlm recursion", () => {
 		}
 	});
 
+	it.each([-1, "0"])("ignores invalid persisted RLM depth %j", (invalidDepth) => {
+		const persistedManager = SessionManager.create(tempDir, join(tempDir, "invalid-depth-sessions"));
+		persistedManager.newSession({ rlmDepth: 2 });
+		persistedManager.flushNow();
+		const sessionFile = persistedManager.getSessionFile();
+		if (!sessionFile) throw new Error("Missing persisted session file");
+		const lines = readFileSync(sessionFile, "utf8").split("\n");
+		lines[0] = JSON.stringify({ ...JSON.parse(lines[0] ?? "{}"), rlmDepth: invalidDepth });
+		writeFileSync(sessionFile, lines.join("\n"));
+		const reopened = SessionManager.open(sessionFile, join(tempDir, "invalid-depth-sessions"));
+		vi.stubEnv("RLM_DEPTH", "1");
+		try {
+			expect(createSession({ maxDepth: 2, sessionManager: reopened }).rlmDepth).toBe(1);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
 	it("keeps a forked root at depth zero so recursion remains allowed", async () => {
 		const source = SessionManager.create(tempDir, join(tempDir, "source-sessions"));
 		source.newSession({ rlmDepth: 0 });
@@ -669,7 +687,7 @@ describe("AgentSession rlm recursion", () => {
 		});
 		const expected = {
 			rlm_child_id: "passive-child",
-			active_session_id: null,
+			active_session_id: "passive-session",
 			session_id: "passive-session",
 			session_name: "passive-worker",
 			session_dir: join(tempDir, "passive-child"),
@@ -776,7 +794,8 @@ describe("AgentSession rlm recursion", () => {
 			releaseChild = resolve;
 		});
 		let childStarted = false;
-		const root = createSession({
+		let root: AgentSession;
+		root = createSession({
 			streamFn: (_model, context) => {
 				const text = userText(context);
 				const stream = createAssistantMessageEventStream();
@@ -785,6 +804,32 @@ describe("AgentSession rlm recursion", () => {
 					stream.push({ type: "done", reason: "stop", message: assistantMessage(`child answer: ${text}`) });
 				});
 				return stream;
+			},
+			agentMessageController: {
+				listAgents: () => {
+					const run = [...(root as unknown as InspectableRlmSession)._activeRlmChildRuns.values()][0];
+					return {
+						current: { activeSessionId: "parent-active", sessionId: root.sessionId },
+						agents: run?.session
+							? [
+									{
+										activeSessionId: "running-active",
+										sessionId: run.session.sessionId,
+										runtimeKind: "subagent" as const,
+										cwd: tempDir,
+										isStreaming: true,
+										unfinishedActionCount: 0,
+										parentActiveSessionId: "parent-active",
+										rlmChildId: run.id,
+										sessionDir: run.sessionDir,
+									},
+								]
+							: [],
+					};
+				},
+				sendAgentMessage: async () => {
+					throw new Error("unexpected send");
+				},
 			},
 		});
 
@@ -805,7 +850,7 @@ describe("AgentSession rlm recursion", () => {
 			subagents: [
 				{
 					rlm_child_id: rootRun.id,
-					active_session_id: null,
+					active_session_id: "running-active",
 					session_id: rootRun.session.sessionId,
 					session_name: createDefaultRlmSubagentSessionName("slow shard", rootRun.id),
 					session_dir: rootRun.sessionDir,

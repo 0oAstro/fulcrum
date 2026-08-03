@@ -514,7 +514,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		if (options?.parentSession) {
 			sessionManager.newSession({
 				parentSession: options.parentSession,
-				rlmDepth: this.session.sessionManager.getHeader()?.rlmDepth,
+				rlmDepth: this.session.sessionManager.getHeader()?.rlmDepth ?? this.session.rlmDepth,
 			});
 		}
 		const lease = this.acquireReplacementLease(sessionManager.getSessionFile());

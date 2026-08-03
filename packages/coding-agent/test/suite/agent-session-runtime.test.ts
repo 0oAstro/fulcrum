@@ -199,6 +199,23 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(runtime.session.sessionManager.getHeader()).toMatchObject({ parentSession, rlmDepth: 0 });
 	});
 
+	it("uses effective runtime depth for a parented new session from a legacy header", async () => {
+		const tempDir = join(tmpdir(), `pi-runtime-legacy-new-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const sessionManager = SessionManager.create(tempDir, join(tempDir, "sessions"));
+		sessionManager.newSession({ rlmDepth: undefined });
+		const parentSession = sessionManager.getSessionFile();
+		if (!parentSession) throw new Error("Missing parent session file");
+		const { runtime } = await createRuntimeForTest(() => {}, {
+			cwd: tempDir,
+			sessionManager,
+			sessionOptions: { rlmDepth: 2 },
+		});
+
+		await runtime.newSession({ parentSession });
+
+		expect(runtime.session.sessionManager.getHeader()).toMatchObject({ parentSession, rlmDepth: 2 });
+	});
+
 	it.each([false, true])(
 		"uses the effective runtime depth when forking a legacy session before its first entry (inMemory=%s)",
 		async (inMemory) => {

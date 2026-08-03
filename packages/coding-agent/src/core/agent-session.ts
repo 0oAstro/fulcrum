@@ -1254,10 +1254,10 @@ export class AgentSession {
 		this._mcpManager = config.mcpManager;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+		const headerRlmDepth = this.sessionManager.getHeader()?.rlmDepth;
 		this._rlmDepth =
 			config.rlmDepth ??
-			this.sessionManager.getHeader()?.rlmDepth ??
-			parseDepth(process.env.RLM_DEPTH, 0, "RLM_DEPTH");
+			(isNonNegativeInteger(headerRlmDepth) ? headerRlmDepth : parseDepth(process.env.RLM_DEPTH, 0, "RLM_DEPTH"));
 		this._configuredRlmMaxDepth = config.rlmMaxDepth;
 		if (this._configuredRlmMaxDepth !== undefined && !isNonNegativeInteger(this._configuredRlmMaxDepth)) {
 			throw new Error("rlmMaxDepth must be a non-negative integer");
@@ -8960,7 +8960,7 @@ export class AgentSession {
 			}
 			subagents.push({
 				rlm_child_id: childId,
-				active_session_id: null,
+				active_session_id: daemonChild.activeSessionId,
 				session_id: daemonChild.sessionId,
 				session_name: daemonChild.sessionName ?? createDefaultRlmSubagentSessionName("", childId),
 				session_dir: daemonChild.sessionDir,
