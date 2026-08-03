@@ -1,6 +1,6 @@
 import { resetCapabilitiesCache, setCapabilities } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
-import { beforeAll, describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import {
 	type SettingsCallbacks,
 	type SettingsConfig,
@@ -79,5 +79,19 @@ describe("SettingsSelectorComponent", () => {
 		} finally {
 			resetCapabilitiesCache();
 		}
+	});
+
+	test("cycles a custom idle eviction value to the next numeric option", () => {
+		const onIdleEvictionMinutesChange = vi.fn();
+		const component = new SettingsSelectorComponent(
+			{ ...config, idleEvictionMinutes: 120 },
+			{ ...callbacks, onIdleEvictionMinutesChange },
+		);
+		const list = component.getSettingsList();
+		for (const character of "idle") list.handleInput(character);
+
+		list.handleInput("\r");
+
+		expect(onIdleEvictionMinutesChange).toHaveBeenCalledWith(180);
 	});
 });
