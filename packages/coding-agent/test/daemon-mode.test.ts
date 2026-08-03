@@ -4282,7 +4282,7 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("closes passive hydration when a runtime-open guard is cancelled during hydration", async () => {
+	it("leaves passive hydration resident when its runtime-open guard is cancelled", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-guarded-hydration-"));
 		let releaseHydration!: () => void;
 		const hydrationGate = new Promise<void>((resolve) => {
@@ -4298,27 +4298,148 @@ describe("daemon mode helpers", () => {
 				childRuntimeGate: hydrationGate,
 			});
 			const internals = fixture.daemon as unknown as {
+				cronStore: AgentCronJobStore;
 				sessions: Map<string, ActiveSessionState>;
-				createRuntime(
-					command: Extract<DaemonCommand, { type: "create" }>,
-					guard?: () => boolean,
-				): Promise<ActiveSessionState>;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				getRunnableCronJob(id: string): AgentCronJob | undefined;
+				runCronJob(job: AgentCronJob): Promise<"skipped" | undefined>;
+				passivateIdleChildren(threshold: number, now: number, limit: number): Promise<number>;
 			};
-			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const parentState = await internals.createRuntime({
+				type: "create",
+				sessionPath: fixture.parentSessionFile,
+			});
+			const parentSession = parentState.runtime.session as unknown as {
+				releaseFinishedRlmChildSession: ReturnType<typeof vi.fn>;
+			};
+			parentSession.releaseFinishedRlmChildSession = vi.fn(() => true);
+			const childInfo = await readSessionInfo(fixture.childSessionFile);
+			if (!childInfo) throw new Error("Missing child session info");
+			const heartbeat = internals.cronStore.createRlmHeartbeat({
+				activeSessionId: "stale-child-active-id",
+				sessionId: childInfo.id,
+				sessionFile: fixture.childSessionFile,
+				cwd: tempDir,
+				runtimeKind: "subagent",
+				scheduleText: "every 30s",
+				prompt: "must not run",
+				now: new Date("2026-01-01T00:00:00.000Z"),
+			});
 			let runnable = true;
-			const opening = internals.createRuntime(
-				{ type: "create", sessionPath: fixture.childSessionFile },
-				() => runnable,
-			);
+			internals.getRunnableCronJob = vi.fn(() => (runnable ? heartbeat : undefined));
+
+			const run = internals.runCronJob(heartbeat);
 			await hydrationStarted;
 			runnable = false;
 			releaseHydration();
 
-			await expect(opening).rejects.toThrow();
-			expect(
-				[...internals.sessions.values()].some((state) => state.runtime.metadata.rlmChildId === fixture.childId),
-			).toBe(false);
+			await expect(run).resolves.toBe("skipped");
+			internals.cronStore.cancel(heartbeat.id);
+			const childState = [...internals.sessions.values()].find(
+				(state) => state.runtime.metadata.rlmChildId === fixture.childId,
+			);
+			expect(childState).toBeDefined();
+			expect(fixture.runtimeSessions[1]?.disposeAsync).not.toHaveBeenCalled();
+			expect(parentSession.releaseFinishedRlmChildSession).not.toHaveBeenCalled();
+
+			await expect(internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1)).resolves.toBe(1);
+			expect(internals.sessions.has(childState!.activeSessionId)).toBe(false);
 			expect(fixture.runtimeSessions[1]?.disposeAsync).toHaveBeenCalledOnce();
+			expect(parentSession.releaseFinishedRlmChildSession).toHaveBeenCalledWith(
+				fixture.childId,
+				childState!.runtime.session,
+			);
+		} finally {
+			releaseHydration();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps an attach-owned passive hydration usable when a joining heartbeat is cancelled", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-shared-guarded-hydration-"));
+		let releaseHydration!: () => void;
+		const hydrationGate = new Promise<void>((resolve) => {
+			releaseHydration = resolve;
+		});
+		let markHydrationStarted!: () => void;
+		const hydrationStarted = new Promise<void>((resolve) => {
+			markHydrationStarted = resolve;
+		});
+		let markHeartbeatJoinStarted!: () => void;
+		const heartbeatJoinStarted = new Promise<void>((resolve) => {
+			markHeartbeatJoinStarted = resolve;
+		});
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir, {
+				childRuntimeStarted: markHydrationStarted,
+				childRuntimeGate: hydrationGate,
+			});
+			const internals = fixture.daemon as unknown as {
+				cronStore: AgentCronJobStore;
+				sessions: Map<string, ActiveSessionState>;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createAgentMessageController(
+					getCurrentState: () => ActiveSessionState | undefined,
+				): AgentSessionMessageController;
+				getRunnableCronJob(id: string): AgentCronJob | undefined;
+				runCronJob(job: AgentCronJob): Promise<"skipped" | undefined>;
+				hydratePassiveRlmSubagent(passive: unknown): Promise<ActiveSessionState>;
+			};
+			const parentState = await internals.createRuntime({
+				type: "create",
+				sessionPath: fixture.parentSessionFile,
+			});
+			const parentSession = parentState.runtime.session as unknown as {
+				releaseFinishedRlmChildSession: ReturnType<typeof vi.fn>;
+				retainFinishedRlmChildSession: ReturnType<typeof vi.fn>;
+			};
+			parentSession.releaseFinishedRlmChildSession = vi.fn(() => true);
+			const childInfo = await readSessionInfo(fixture.childSessionFile);
+			if (!childInfo) throw new Error("Missing child session info");
+			const heartbeat = internals.cronStore.createRlmHeartbeat({
+				activeSessionId: "stale-child-active-id",
+				sessionId: childInfo.id,
+				sessionFile: fixture.childSessionFile,
+				cwd: tempDir,
+				runtimeKind: "subagent",
+				scheduleText: "every 30s",
+				prompt: "must not run",
+				now: new Date("2026-01-01T00:00:00.000Z"),
+			});
+			let runnable = true;
+			internals.getRunnableCronJob = vi.fn(() => (runnable ? heartbeat : undefined));
+
+			const attach = internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			await hydrationStarted;
+			const hydratePassive = internals.hydratePassiveRlmSubagent.bind(fixture.daemon);
+			internals.hydratePassiveRlmSubagent = vi.fn(async (passive) => {
+				markHeartbeatJoinStarted();
+				return hydratePassive(passive);
+			});
+			const run = internals.runCronJob(heartbeat);
+			await heartbeatJoinStarted;
+			runnable = false;
+			releaseHydration();
+
+			const attachedState = await attach;
+			await expect(run).resolves.toBe("skipped");
+			expect(internals.sessions.get(attachedState.activeSessionId)).toBe(attachedState);
+			expect(fixture.runtimeSessions[1]?.disposeAsync).not.toHaveBeenCalled();
+			expect(parentSession.releaseFinishedRlmChildSession).not.toHaveBeenCalled();
+			expect(parentSession.retainFinishedRlmChildSession).toHaveBeenCalledWith(
+				fixture.childId,
+				attachedState.runtime.session,
+			);
+
+			await expect(
+				internals
+					.createAgentMessageController(() => parentState)
+					.sendAgentMessage({ target: fixture.childId, message: "still usable" }),
+			).resolves.toMatchObject({ deliveryStatus: "delivered", target: { runtimeKind: "subagent" } });
+			expect(fixture.acceptAgentMessagePrompt).toHaveBeenCalledWith(
+				expect.stringContaining("still usable"),
+				expect.any(Object),
+			);
 		} finally {
 			releaseHydration();
 			rmSync(tempDir, { recursive: true, force: true });

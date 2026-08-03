@@ -1276,7 +1276,6 @@ export class AgentDaemon {
 			this.adoptClientEnv(passiveSubagent.rootParentState, clientEnv);
 			const state = await this.hydratePassiveRlmSubagent(passiveSubagent);
 			if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
-				await this.closeCancelledPassiveHydration(state);
 				throw new RuntimeOpenCancelledError();
 			}
 			if (command.name) {
@@ -1942,7 +1941,6 @@ export class AgentDaemon {
 					? await this.waitForBoundSession(resident)
 					: undefined;
 			if (passiveSubagent && childState && this.getRunnableCronJob(job.id) === undefined) {
-				await this.closeCancelledPassiveHydration(childState);
 				throw new RuntimeOpenCancelledError();
 			}
 			if (!childState || childState.runtime.metadata.kind !== "subagent") {
@@ -2487,16 +2485,6 @@ export class AgentDaemon {
 				this.openingSessions.delete(sessionKey);
 			}
 		}
-	}
-
-	private async closeCancelledPassiveHydration(state: ActiveSessionState): Promise<void> {
-		const metadata = state.runtime.metadata;
-		if (metadata.kind === "subagent" && metadata.parentActiveSessionId && metadata.rlmChildId) {
-			this.sessions
-				.get(metadata.parentActiveSessionId)
-				?.runtime.session.releaseFinishedRlmChildSession(metadata.rlmChildId, state.runtime.session);
-		}
-		await this.closeSession(state, "shutdown", true, false);
 	}
 
 	private async waitForBoundSession(state: ActiveSessionState): Promise<ActiveSessionState> {
