@@ -3549,23 +3549,14 @@ export class DaemonSupervisor {
 				const generations = this.snapshotGenerationsFor(worker, activeSessionId);
 				let generation = generations.get(begin.snapshotId);
 				if (generation?.incoming) {
-					// A worker legitimately restarts an in-flight transfer when a second
-					// catch-up lands mid-stream (observed with a large, fast-changing RLM
-					// child-update stream). The partial transfer is worthless but the
-					// worker is healthy, so discard the partial generation and accept the
-					// restart instead of killing the connection — closing it fails
-					// prompt_and_wait and loses the whole session.
-					this.log(
-						`Snapshot ${begin.snapshotId} for ${activeSessionId} restarted before completion; ` +
-							"discarding the partial transfer and accepting the restart",
-					);
-					this.failSnapshotGeneration(
+					this.failWorkerSnapshotCache(
 						worker,
 						activeSessionId,
-						generation,
-						new Error(`Snapshot ${begin.snapshotId} transfer restarted; retry the read`),
+						new Error(`Snapshot ${begin.snapshotId} restarted before completion`),
+						true,
+						begin.snapshotId,
 					);
-					generation = undefined;
+					return;
 				}
 				// Snapshot summaries/state include live fields (for example activity and attached client
 				// counts) that can change without advancing the transcript sequence. Treat the stable
