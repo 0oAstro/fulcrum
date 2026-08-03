@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import type { Socket } from "node:net";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -31,9 +31,13 @@ import {
 } from "../src/modes/daemon/daemon-mode.js";
 import {
 	createDaemonCommandEnvelope,
+	DAEMON_PROTOCOL_INFO,
+	DAEMON_SCHEMA_REVISION,
 	type DaemonAttachResult,
 	type DaemonCommand,
+	failure,
 } from "../src/modes/daemon/daemon-protocol.js";
+import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
 
 describe("daemon mode helpers", () => {
 	it("preserves envelope client identity while registering prompt admission", () => {
@@ -1016,6 +1020,64 @@ describe("daemon mode helpers", () => {
 			}),
 		).rejects.toThrow("Unknown active session: deleted-child");
 		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(source, "deleted-child", "continue", undefined);
+	});
+
+	it("does not retry permanent ambiguity errors from the supervisor", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pa-ambiguous-"));
+		const socketPath = join(tempDir, "s");
+		let requestCount = 0;
+		const server = createServer((socket) => {
+			socket.write(
+				`${JSON.stringify({
+					type: "daemon_hello",
+					socketPath,
+					protocol: DAEMON_PROTOCOL_INFO,
+					schemaRevision: DAEMON_SCHEMA_REVISION,
+					serverCapabilities: [],
+				})}\n`,
+			);
+			let buffered = "";
+			socket.on("data", (chunk: Buffer) => {
+				buffered += chunk.toString("utf8");
+				const newline = buffered.indexOf("\n");
+				if (newline < 0 || requestCount > 0) return;
+				const command = JSON.parse(buffered.slice(0, newline)) as { id?: string };
+				requestCount++;
+				socket.write(
+					`${JSON.stringify(failure(command.id, "send_message", new Error('Ambiguous session selector "duplicate"')))}\n`,
+				);
+			});
+		});
+		const previousSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		try {
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(socketPath, resolve);
+			});
+			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
+			const daemon = new AgentDaemon(join(tempDir, "worker.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: vi.fn(),
+			});
+			const source = makeState("source");
+			const internals = daemon as unknown as {
+				sendRemoteAgentSessionMessage(
+					fromState: ActiveSessionState,
+					targetSelector: string,
+					message: string,
+				): Promise<unknown>;
+			};
+
+			await expect(internals.sendRemoteAgentSessionMessage(source, "duplicate", "hello")).rejects.toThrow(
+				'Ambiguous session selector "duplicate"',
+			);
+			expect(requestCount).toBe(1);
+		} finally {
+			if (previousSocketPath === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSocketPath;
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("reports queued status when a direct accept races into the queue", async () => {
@@ -3136,6 +3198,84 @@ describe("daemon mode helpers", () => {
 		expect(client.catchupActiveSessionIds).toEqual(new Set());
 	});
 
+	it("does not attach a non-chunked client until its snapshot is ready", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const state = makeState("active");
+		const client = makeClient("client-1", state.activeSessionId);
+		client.attachedActiveSessionIds.clear();
+		let releaseSnapshot!: () => void;
+		const snapshotGate = new Promise<void>((resolve) => {
+			releaseSnapshot = resolve;
+		});
+		const result = {
+			activeSessionId: state.activeSessionId,
+			snapshot: { summary: {}, state: {}, messages: [] },
+			lastEventSequence: 0,
+		} as unknown as DaemonAttachResult;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAttachResult: ReturnType<typeof vi.fn>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.createAttachResult = vi.fn(async () => {
+			await snapshotGate;
+			return result;
+		});
+
+		const attach = internals.handleCommand(client, { type: "attach", activeSessionId: state.activeSessionId });
+		await vi.waitFor(() => expect(internals.createAttachResult).toHaveBeenCalledOnce());
+		expect(state.clients).not.toContain(client);
+		expect(client.attachedActiveSessionIds).not.toContain(state.activeSessionId);
+		releaseSnapshot();
+		await attach;
+		expect(state.clients).toContain(client);
+		expect(client.attachedActiveSessionIds).toContain(state.activeSessionId);
+	});
+
+	it("drops a backpressure catch-up when the client detaches during snapshot creation", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const state = makeState("active");
+		const write = vi.fn(() => true);
+		const client = makeClient("client-1", state.activeSessionId);
+		client.socket = { destroyed: false, write } as unknown as Socket;
+		client.catchupActiveSessionIds = new Set([state.activeSessionId]);
+		state.clients.add(client);
+		let releaseSnapshot!: () => void;
+		const snapshotGate = new Promise<void>((resolve) => {
+			releaseSnapshot = resolve;
+		});
+		const result = {
+			activeSessionId: state.activeSessionId,
+			snapshot: { summary: {}, state: {}, messages: [], lastEventSequence: 0 },
+			lastEventSequence: 0,
+		} as unknown as DaemonAttachResult;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAttachResult: ReturnType<typeof vi.fn>;
+			drainBackpressuredClientCatchups(client: DaemonSocketClient): Promise<void>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.createAttachResult = vi.fn(async () => {
+			await snapshotGate;
+			return result;
+		});
+
+		const catchup = internals.drainBackpressuredClientCatchups(client);
+		await vi.waitFor(() => expect(internals.createAttachResult).toHaveBeenCalledOnce());
+		state.clients.delete(client);
+		client.attachedActiveSessionIds.delete(state.activeSessionId);
+		releaseSnapshot();
+		await catchup;
+		expect(write).not.toHaveBeenCalled();
+	});
+
 	it("marks a chunked attach as snapshotting before deferred streaming", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-snapshot-order-"));
 		try {
@@ -4030,6 +4170,41 @@ describe("daemon mode helpers", () => {
 			).toHaveBeenCalledWith(fixture.grandchildId, grandchildState.runtime.session);
 		} finally {
 			releaseHydration();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not passivate a child that starts streaming during the fence snapshot", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passivation-stream-race-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				listPassiveRlmSubagents: ReturnType<typeof vi.fn>;
+				passivateIdleChildren(threshold: number, now: number, limit: number): Promise<number>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			const childSession = childState.runtime.session as unknown as {
+				isStreaming: boolean;
+				isSessionActive: boolean;
+				abort: ReturnType<typeof vi.fn>;
+			};
+			let passiveListCalls = 0;
+			internals.listPassiveRlmSubagents = vi.fn(async () => {
+				passiveListCalls++;
+				if (passiveListCalls === 2) {
+					childSession.isStreaming = true;
+					childSession.isSessionActive = true;
+				}
+				return [];
+			});
+
+			await expect(internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1)).resolves.toBe(0);
+			expect(passiveListCalls).toBe(2);
+			expect(childSession.abort).not.toHaveBeenCalled();
+			expect(parentState.runtime.session.releaseFinishedRlmChildSession).not.toHaveBeenCalled();
+		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

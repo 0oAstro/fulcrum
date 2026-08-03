@@ -144,8 +144,10 @@ export function buildSessionList(
 					activeSession,
 					savedSession,
 					heartbeatSessionIds.has(activeSession.activeSessionId),
-					registeredHeartbeatSessionIds.has(activeSession.activeSessionId),
-					registeredCronSessionIds.has(activeSession.activeSessionId),
+					registeredHeartbeatSessionIds.has(activeSession.activeSessionId) ||
+						registeredHeartbeatSessionFiles.has(sessionFile),
+					registeredCronSessionIds.has(activeSession.activeSessionId) ||
+						registeredCronSessionFiles.has(sessionFile),
 				),
 			);
 			seenActiveSessionIds.add(activeSession.activeSessionId);
@@ -162,13 +164,17 @@ export function buildSessionList(
 
 	for (const activeSession of activeSessions) {
 		if (!seenActiveSessionIds.has(activeSession.activeSessionId)) {
+			const sessionFile = activeSession.runtime.session.sessionFile;
+			const resolvedSessionFile = sessionFile ? resolve(sessionFile) : undefined;
 			entries.push(
 				summaryForActiveSession(
 					activeSession,
 					undefined,
 					heartbeatSessionIds.has(activeSession.activeSessionId),
-					registeredHeartbeatSessionIds.has(activeSession.activeSessionId),
-					registeredCronSessionIds.has(activeSession.activeSessionId),
+					registeredHeartbeatSessionIds.has(activeSession.activeSessionId) ||
+						(resolvedSessionFile !== undefined && registeredHeartbeatSessionFiles.has(resolvedSessionFile)),
+					registeredCronSessionIds.has(activeSession.activeSessionId) ||
+						(resolvedSessionFile !== undefined && registeredCronSessionFiles.has(resolvedSessionFile)),
 				),
 			);
 		}
