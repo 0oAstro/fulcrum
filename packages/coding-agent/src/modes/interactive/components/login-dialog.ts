@@ -369,7 +369,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	handleInput(data: string): void {
 		const kb = getKeybindings();
 
-		if (this.authUrl && kb.matches(data, "app.clipboard.copyLoginUrl")) {
+		if (!this.inputVisible && this.authUrl && kb.matches(data, "app.clipboard.copyLoginUrl")) {
 			void this.copyAuthUrl();
 			return;
 		}
