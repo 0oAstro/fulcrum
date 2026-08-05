@@ -14,6 +14,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
+import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { formatNoModelsAvailableMessage } from "../src/core/auth-guidance.js";
 import { type AuthStatus, AuthStorage } from "../src/core/auth-storage.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
@@ -23,6 +24,7 @@ import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { emptyUsage } from "../src/core/usage.js";
+import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type {
 	AgentConnectionExtensionUiRequest,
 	AgentConnectionExtensionUiResponse,
@@ -31,26 +33,22 @@ import type {
 	AgentConnectionModelCatalog,
 	AgentConnectionResourceDiagnostic,
 	AgentConnectionResourceSnapshot,
-	AgentConnectionRlmChildAgentSnapshot,
 	AgentConnectionSessionContext,
 	AgentConnectionSessionEvent,
 	AgentConnectionSnapshot,
 	AgentConnectionSourceInfo,
 	AgentConnectionState,
 } from "../src/modes/agent-connection/types.js";
+import { AgentConnectionPromptAdmissionError } from "../src/modes/agent-connection/types.js";
 import { AgentActivityTracker } from "../src/modes/interactive/agent-activity.js";
 import type { AuthenticationResult } from "../src/modes/interactive/auth-flows.js";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.js";
 import type { ConfigurationMenuComponent } from "../src/modes/interactive/components/configuration-menu.js";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
-import {
-	formatSplashCwd,
-	InteractiveMode,
-	mergeChildAgentSnapshots,
-	truncatePathMiddle,
-} from "../src/modes/interactive/interactive-mode.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { formatSplashCwd, InteractiveMode, truncatePathMiddle } from "../src/modes/interactive/interactive-mode.js";
+import { ClientPromptStashStore, type PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -107,7 +105,7 @@ function createConnectionState(overrides: Partial<AgentConnectionState> = {}): A
 		leafId: null,
 		autoCompactionEnabled: true,
 		messageCount: 0,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		compactionCount: 0,
 		goal: emptyGoalState(),
 		scopedModels: [],
@@ -116,56 +114,6 @@ function createConnectionState(overrides: Partial<AgentConnectionState> = {}): A
 		...overrides,
 	};
 }
-
-describe("mergeChildAgentSnapshots", () => {
-	const rich: AgentConnectionRlmChildAgentSnapshot = {
-		id: "child-1",
-		activeSessionId: "active-child-1",
-		model: "openai/gpt-5.4",
-		label: "Inspect the scheduler",
-		status: "running",
-		durationMs: 5_000,
-		answerPreview: "Reading the queue",
-		toolUseCount: 4,
-		tokenCount: 41_000,
-		recap: "Tracing dispatch",
-		sessionDir: "/tmp/child-1",
-		activity: { kind: "executing", toolName: "ipython" },
-	};
-
-	test("preserves rich live fields when a daemon resync is sparse", () => {
-		const merged = mergeChildAgentSnapshots(rich, {
-			id: "child-1",
-			label: "Inspect the scheduler",
-			status: "running",
-			sessionDir: "/tmp/child-1",
-		});
-
-		expect(merged).toMatchObject({
-			activeSessionId: "active-child-1",
-			model: "openai/gpt-5.4",
-			durationMs: 5_000,
-			answerPreview: "Reading the queue",
-			toolUseCount: 4,
-			tokenCount: 41_000,
-			recap: "Tracing dispatch",
-			activity: { kind: "executing", toolName: "ipython" },
-		});
-	});
-
-	test("clears transient activity when the child finishes", () => {
-		const merged = mergeChildAgentSnapshots(rich, {
-			id: "child-1",
-			label: "Inspect the scheduler",
-			status: "done",
-			sessionDir: "/tmp/child-1",
-		});
-
-		expect(merged.activity).toBeUndefined();
-		expect(merged.toolUseCount).toBe(4);
-		expect(merged.tokenCount).toBe(41_000);
-	});
-});
 
 describe("InteractiveMode update notifications", () => {
 	beforeAll(() => {
@@ -483,6 +431,40 @@ describe("InteractiveMode.renderSessionContext", () => {
 		expect(renderAll(chatContainer)).toContain("Showing latest 400 of 405 messages for faster open.");
 	});
 
+	test("keeps equal-timestamp legacy messages after the compaction summary", async () => {
+		const { harness, addMessageToChat } = createRenderSessionContextHarness();
+		const earlier = userMessage("earlier", 4);
+		const summary = {
+			role: "compactionSummary",
+			summary: "legacy summary",
+			tokensBefore: 123,
+			timestamp: 5,
+		} as AgentMessage;
+		const equalLater = userMessage("equal later", 5);
+
+		await renderMessages(harness, [summary, earlier, equalLater]);
+		expect(addMessageToChat.mock.calls.map((call) => call[0])).toEqual([earlier, summary, equalLater]);
+	});
+
+	test("orders the compaction summary at its exact boundary before bounding the initial transcript", async () => {
+		const { harness, addMessageToChat } = createRenderSessionContextHarness();
+		const retained = Array.from({ length: 5 }, (_, index) => userMessage(`retained ${index}`, 5));
+		const summary = {
+			role: "compactionSummary",
+			summary: "summary",
+			tokensBefore: 123,
+			retainedMessageCount: retained.length,
+			timestamp: 5,
+		} as AgentMessage;
+		const later = Array.from({ length: 399 }, (_, index) => userMessage(`later ${index}`, 5));
+
+		await renderMessages(harness, [summary, ...retained, ...later], { limitTranscript: true });
+
+		expect(addMessageToChat).toHaveBeenCalledTimes(400);
+		expect(addMessageToChat.mock.calls[0]?.[0]).toBe(summary);
+		expect(addMessageToChat.mock.calls[1]?.[0]).toMatchObject({ content: "later 0" });
+	});
+
 	test("preserves the full transcript when rebuilding a cleared transcript", async () => {
 		const { harness, chatContainer, addMessageToChat } = createRenderSessionContextHarness();
 		chatContainer.addChild({ render: () => ["old transcript"], invalidate: () => {} });
@@ -598,14 +580,47 @@ describe("InteractiveMode.renderSessionContext", () => {
 });
 
 type SubmitHandlerHarness = {
-	defaultEditor: { onSubmit?: (text: string) => Promise<void> };
-	editor: { setText: (text: string) => void; addToHistory?: (text: string) => void };
+	defaultEditor: {
+		onSubmit?: (text: string) => Promise<void>;
+	};
+	editor: {
+		getText: () => string;
+		getExpandedText?: () => string;
+		getPasteSnapshot?: () => unknown;
+		setText: (text: string) => void;
+		addToHistory?: (text: string) => void;
+		onSubmit?: (text: string) => Promise<void>;
+	};
+	promptStash?: { text: string };
+	promptStashState: PromptStashState;
+	pastedImages: Map<number, unknown>;
+	getPromptStashImages: (text: string) => readonly (readonly [number, unknown])[];
+	retainStartupPromptDrafts?: (prompts: readonly { text: string; images?: readonly unknown[] }[]) => void;
+	nextImageMarkerId?: number;
+	admitPendingStartupPrompts?: () => Promise<"admitted" | "retained" | "lifecycle-cancelled">;
+	isShuttingDown?: boolean;
+	returnToAgentsViewRequested?: boolean;
+	submittedInputBehavior: "steer" | "followUp";
+	latestEditorPromptStash?: unknown;
+	pendingSubmittedPromptStash?: unknown;
+	snapshotPromptStash: (text: string) => unknown;
+	retainSubmittedDraft: (stash: unknown, submissionGeneration: number) => void;
+	inputSubmissionGeneration: number;
+	inputSubmissionsPending: number;
+	pendingPromptStashReleases: { sessionId: string; state: unknown }[];
+	retainedSubmissionGenerations: WeakMap<object, number>;
+	releasePromptStashSession?: () => void;
+	flushPendingBashComponents: () => void;
+	collectImagesFor: () => unknown[];
+	updatePendingMessagesDisplay: () => void;
+	ui: { requestRender: () => void };
 	clearSideQuestion: () => void;
 	clearShortcutGuide: () => void;
 	showWarning: (message: string) => void;
 	showError: (message: string) => void;
 	isBashRunning: () => boolean;
 	patchConnectionState: (patch: Record<string, unknown>) => void;
+	requestAgentsView: () => Promise<void>;
 	agentConnection: {
 		prompt: (message: string) => Promise<void>;
 		executeBash: (command: string, options?: { excludeFromContext?: boolean }) => Promise<void>;
@@ -616,13 +631,37 @@ type SubmitHandlerHarness = {
 function createSubmitHandlerHarness(overrides: Partial<SubmitHandlerHarness> = {}): SubmitHandlerHarness {
 	const fakeThis: SubmitHandlerHarness = {
 		defaultEditor: {},
-		editor: { setText: vi.fn(), addToHistory: vi.fn() },
+		editor: { getText: vi.fn(() => ""), setText: vi.fn(), addToHistory: vi.fn() },
 		clearSideQuestion: vi.fn(),
 		clearShortcutGuide: vi.fn(),
 		showWarning: vi.fn(),
 		showError: vi.fn(),
 		isBashRunning: () => false,
 		patchConnectionState: vi.fn(),
+		promptStashState: {},
+		requestAgentsView: vi.fn(async () => {}),
+		promptStash: undefined,
+		pastedImages: new Map(),
+		getPromptStashImages: vi.fn(() => []),
+		snapshotPromptStash: vi.fn((text) => ({ text })),
+		retainSubmittedDraft: (
+			InteractiveMode.prototype as unknown as { retainSubmittedDraft(stash: unknown, generation: number): void }
+		).retainSubmittedDraft,
+		retainStartupPromptDrafts: (
+			InteractiveMode.prototype as unknown as {
+				retainStartupPromptDrafts(prompts: readonly { text: string; images?: readonly unknown[] }[]): void;
+			}
+		).retainStartupPromptDrafts,
+		nextImageMarkerId: 1,
+		submittedInputBehavior: "steer",
+		inputSubmissionGeneration: 0,
+		inputSubmissionsPending: 0,
+		pendingPromptStashReleases: [],
+		retainedSubmissionGenerations: new WeakMap(),
+		flushPendingBashComponents: vi.fn(),
+		collectImagesFor: vi.fn(() => []),
+		updatePendingMessagesDisplay: vi.fn(),
+		ui: { requestRender: vi.fn() },
 		agentConnection: {
 			prompt: vi.fn(async () => {}),
 			executeBash: vi.fn(async () => {}),
@@ -639,6 +678,211 @@ function createSubmitHandlerHarness(overrides: Partial<SubmitHandlerHarness> = {
 }
 
 describe("InteractiveMode submit handling", () => {
+	test.each(["normal Enter", "installed custom editor"])("captures exact rich state for %s", async () => {
+		const image = { type: "image", data: "base64", mimeType: "image/png" };
+		const pasteSnapshot = { pastes: [[1, "expanded paste"]] as const, pasteCounter: 2 };
+		const rawText = "draft [paste #1] [image #7]";
+		let editorText = rawText;
+		const editor = {
+			getText: () => editorText,
+			getExpandedText: () => "draft expanded paste [image #7]",
+			getPasteSnapshot: () => pasteSnapshot,
+			setText: (text: string) => {
+				editorText = text;
+			},
+			onSubmit: undefined as ((text: string) => Promise<void>) | undefined,
+		};
+		const fakeThis = createSubmitHandlerHarness({
+			editor,
+			pastedImages: new Map([[7, image]]),
+			getPromptStashImages: () => [[7, image]],
+			admitPendingStartupPrompts: vi.fn(async (): Promise<"lifecycle-cancelled"> => "lifecycle-cancelled"),
+		});
+		delete fakeThis.promptStash;
+		fakeThis.snapshotPromptStash = (
+			InteractiveMode.prototype as unknown as { snapshotPromptStash(text: string): unknown }
+		).snapshotPromptStash.bind({
+			editor,
+			snapshotPromptStashFrom: (
+				InteractiveMode.prototype as unknown as {
+					snapshotPromptStashFrom(editor: unknown, text: string): unknown;
+				}
+			).snapshotPromptStashFrom,
+			getPromptStashImages: fakeThis.getPromptStashImages,
+		} as never);
+		fakeThis.latestEditorPromptStash = fakeThis.snapshotPromptStash(rawText);
+		editor.onSubmit = fakeThis.defaultEditor.onSubmit;
+
+		// Both pi-tui's normal editor and an installed extension editor call their
+		// wired onSubmit only after clearing their own state.
+		editorText = "";
+		await editor.onSubmit?.("draft expanded paste [image #7]");
+
+		expect(fakeThis.promptStashState.stash).toEqual({
+			text: rawText,
+			expandedText: "draft expanded paste [image #7]",
+			pasteSnapshot,
+			images: [[7, image]],
+		});
+	});
+
+	test.each([true, false])(
+		"custom editor replacement preserves the submitted rich draft through lifecycle cancellation (snapshot restore: %s)",
+		async (supportsSnapshotRestore) => {
+			initTheme("dark");
+			const image = { type: "image", data: "base64", mimeType: "image/png" };
+			const pasteSnapshot = { pastes: [[5, "expanded paste"]] as const, pasteCounter: 6 };
+			const rawText = "draft [paste #5] [image #7]";
+			const expandedText = "draft expanded paste [image #7]";
+			let oldText = rawText;
+			const oldEditor = {
+				onSubmit: undefined as ((text: string) => Promise<void>) | undefined,
+				onChange: undefined as ((text: string) => void) | undefined,
+				getText: () => oldText,
+				getExpandedText: () => expandedText,
+				getPasteSnapshot: () => pasteSnapshot,
+				setText: (text: string) => {
+					oldText = text;
+				},
+				handleInput: vi.fn(),
+				render: () => [],
+			};
+			let customText = "";
+			let restoredSnapshot: unknown;
+			const customEditor = {
+				getText: () => customText,
+				getExpandedText: () => (restoredSnapshot ? expandedText : customText),
+				getPasteSnapshot: () => restoredSnapshot,
+				restorePasteSnapshot: supportsSnapshotRestore
+					? (snapshot: unknown) => {
+							restoredSnapshot = snapshot;
+						}
+					: undefined,
+				setText: (text: string) => {
+					customText = text;
+					customEditor.onChange?.(text);
+				},
+				handleInput: vi.fn(),
+				render: () => [],
+				onSubmit: undefined as ((text: string) => Promise<void>) | undefined,
+				onChange: undefined as ((text: string) => void) | undefined,
+			};
+			const lifecycleBarrier = createDeferred<"admitted" | "lifecycle-cancelled">();
+			const promptStashState: PromptStashState = {};
+			const fakeThis = createSubmitHandlerHarness({
+				defaultEditor: oldEditor,
+				editor: oldEditor,
+				promptStashState,
+				pastedImages: new Map([[7, image]]),
+				getPromptStashImages: (text) => (text.includes("[image #7]") ? [[7, image]] : []),
+				admitPendingStartupPrompts: () => lifecycleBarrier.promise,
+			});
+			Object.assign(fakeThis, {
+				editorContainer: new Container(),
+				ui: { setFocus: vi.fn(), requestRender: vi.fn() },
+				keybindings: {},
+				autocompleteProvider: undefined,
+				showStatus: vi.fn(),
+			});
+			Object.defineProperty(fakeThis, "promptStash", {
+				configurable: true,
+				get: () => promptStashState.stash,
+				set: (stash) => {
+					promptStashState.stash = stash;
+				},
+			});
+			fakeThis.snapshotPromptStash = (
+				InteractiveMode.prototype as unknown as { snapshotPromptStash(text: string): unknown }
+			).snapshotPromptStash.bind(fakeThis as never);
+			(
+				fakeThis as unknown as { snapshotPromptStashFrom(editor: unknown, text: string): unknown }
+			).snapshotPromptStashFrom = (
+				InteractiveMode.prototype as unknown as {
+					snapshotPromptStashFrom(editor: unknown, text: string): unknown;
+				}
+			).snapshotPromptStashFrom;
+			(
+				InteractiveMode.prototype as unknown as { setupEditorSubmitHandler(this: SubmitHandlerHarness): void }
+			).setupEditorSubmitHandler.call(fakeThis);
+			oldEditor.onChange = (text: string) => {
+				if (text.length > 0) fakeThis.latestEditorPromptStash = fakeThis.snapshotPromptStash(text);
+			};
+
+			(
+				InteractiveMode.prototype as unknown as {
+					setCustomEditorComponent(this: unknown, factory: () => unknown): void;
+				}
+			).setCustomEditorComponent.call(fakeThis, () => customEditor);
+
+			expect(customText).toBe(supportsSnapshotRestore ? rawText : expandedText);
+			expect(restoredSnapshot).toBe(supportsSnapshotRestore ? pasteSnapshot : undefined);
+			customEditor.setText("");
+			const submission = customEditor.onSubmit?.(expandedText);
+			await Promise.resolve();
+			expect(fakeThis.agentConnection.prompt).not.toHaveBeenCalled();
+			lifecycleBarrier.resolve("lifecycle-cancelled");
+			await submission;
+
+			expect(promptStashState.stash).toEqual({
+				text: rawText,
+				expandedText,
+				pasteSnapshot,
+				images: [[7, image]],
+			});
+			restoredSnapshot = undefined;
+			(
+				InteractiveMode.prototype as unknown as { restorePromptStashIfEditorEmpty(this: unknown): boolean }
+			).restorePromptStashIfEditorEmpty.call(fakeThis);
+			expect(customText).toBe(supportsSnapshotRestore ? rawText : expandedText);
+			expect(restoredSnapshot).toBe(supportsSnapshotRestore ? pasteSnapshot : undefined);
+			expect(promptStashState.stash).toBeUndefined();
+		},
+	);
+
+	test("captures exact rich state for Alt+Enter before clearing", async () => {
+		const image = { type: "image", data: "base64", mimeType: "image/png" };
+		const pasteSnapshot = { pastes: [[3, "expanded paste"]] as const, pasteCounter: 4 };
+		let editorText = "alt [paste #3] [image #9]";
+		const fakeThis = createSubmitHandlerHarness({
+			editor: {
+				getText: () => editorText,
+				getExpandedText: () => "alt expanded paste [image #9]",
+				getPasteSnapshot: () => pasteSnapshot,
+				setText: (text: string) => {
+					editorText = text;
+				},
+			},
+			pastedImages: new Map([[9, image]]),
+			getPromptStashImages: () => [[9, image]],
+			admitPendingStartupPrompts: vi.fn(async (): Promise<"lifecycle-cancelled"> => "lifecycle-cancelled"),
+		});
+		delete fakeThis.promptStash;
+		fakeThis.editor.onSubmit = fakeThis.defaultEditor.onSubmit;
+		fakeThis.snapshotPromptStash = (
+			InteractiveMode.prototype as unknown as { snapshotPromptStash(text: string): unknown }
+		).snapshotPromptStash.bind({
+			editor: fakeThis.editor,
+			snapshotPromptStashFrom: (
+				InteractiveMode.prototype as unknown as {
+					snapshotPromptStashFrom(editor: unknown, text: string): unknown;
+				}
+			).snapshotPromptStashFrom,
+			getPromptStashImages: fakeThis.getPromptStashImages,
+		} as never);
+
+		await (
+			InteractiveMode.prototype as unknown as { handleFollowUp(this: SubmitHandlerHarness): Promise<void> }
+		).handleFollowUp.call(fakeThis);
+
+		expect(editorText).toBe("");
+		expect(fakeThis.promptStashState.stash).toEqual({
+			text: "alt [paste #3] [image #9]",
+			expandedText: "alt expanded paste [image #9]",
+			pasteSnapshot,
+			images: [[9, image]],
+		});
+	});
+
 	test("routes ! shortcuts to executeBash on the agent connection", async () => {
 		const fakeThis = createSubmitHandlerHarness();
 
@@ -782,8 +1026,15 @@ describe("InteractiveMode pending bash components", () => {
 			pendingBashComponents: [],
 			getAllQueuedMessages: () => ({
 				steering: ["Heartbeat prompt: check steering", "Goal context: steer goal", "plain steering"],
-				followUp: ["Heartbeat prompt: check status", "Goal context: continue goal", "plain follow-up"],
+				followUp: [
+					"Heartbeat prompt: check status",
+					"Goal context: continue goal",
+					"plain follow-up",
+					"/compact focus",
+					"/unknown",
+				],
 			}),
+			isRecognizedSlashCommand: (name: string) => name === "compact",
 			getAppKeyDisplay: () => "Ctrl+Q",
 			featureHintSuppressedByQueue: false,
 			clearFeatureHintPresentation: vi.fn(),
@@ -793,7 +1044,10 @@ describe("InteractiveMode pending bash components", () => {
 			InteractiveMode.prototype as unknown as { updatePendingMessagesDisplay(this: unknown): void }
 		).updatePendingMessagesDisplay.call(fakeThis);
 
+		const raw = queuedMessagesContainer.render(100).join("\n");
 		const rendered = normalizeRenderedOutput(queuedMessagesContainer);
+		expect(raw).toContain(theme.fg("accent", "/compact"));
+		expect(raw).not.toContain(theme.fg("accent", "/unknown"));
 		expect(rendered).toContain("Heartbeat prompt: check steering");
 		expect(rendered).not.toContain("Steering: Heartbeat prompt");
 		expect(rendered).toContain("Goal context: steer goal");
@@ -876,7 +1130,6 @@ describe("InteractiveMode pending bash components", () => {
 			shortcutGuideContainer: new Container(),
 			pendingMessagesContainer: new Container(),
 			queuedMessagesContainer: new Container(),
-			compactionQueuedMessages: [],
 			pastedImages: new Map(),
 			liveImageMarkerIds: () => new Set(),
 			defaultEditor: editorStub,
@@ -892,7 +1145,7 @@ describe("InteractiveMode pending bash components", () => {
 			ipythonToolComponents: new Map(),
 			lateIpythonSentAgentMessages: new Map(),
 			resetPendingToolState: vi.fn(),
-			resetChildAgentInspector: vi.fn(),
+			resetSubagentSummary: vi.fn(),
 			setGoalAnnouncementBaseline: vi.fn(),
 			syncGoalTray: vi.fn(),
 			getGoalState: () => emptyGoalState(),
@@ -909,6 +1162,26 @@ describe("InteractiveMode pending bash components", () => {
 });
 
 describe("InteractiveMode connection events", () => {
+	test("rendering a switched session tolerates a transient queue refresh failure", async () => {
+		const harness = {
+			resetCurrentSessionRenderState: vi.fn(),
+			renderInitialMessages: vi.fn(async () => {}),
+			refreshConnectionQueue: vi.fn(async () => {
+				throw new Error("queue unavailable");
+			}),
+			syncWorkingLoader: vi.fn(),
+		};
+
+		await expect(
+			(
+				InteractiveMode.prototype as unknown as {
+					renderCurrentSessionState(this: typeof harness): Promise<void>;
+				}
+			).renderCurrentSessionState.call(harness),
+		).resolves.toBeUndefined();
+		expect(harness.syncWorkingLoader).toHaveBeenCalledOnce();
+	});
+
 	test("degrades heartbeat refresh failures without hiding queue refresh failures during rebind", async () => {
 		const rebindCurrentSession = (
 			InteractiveMode.prototype as unknown as { rebindCurrentSession(this: InteractiveMode): Promise<void> }
@@ -977,7 +1250,7 @@ describe("InteractiveMode connection events", () => {
 				thinkingLevel: "medium",
 				model: null,
 			})),
-			seedChildAgentInspector: vi.fn(),
+			seedSubagentSummary: vi.fn(),
 			setSessionHasMessages: vi.fn(),
 			applyConnectionStateSnapshot: vi.fn(),
 			renderSessionContext: renderSessionContextMock,
@@ -1020,6 +1293,8 @@ describe("InteractiveMode connection events", () => {
 					return vi.fn();
 				}),
 			},
+			sessionEventQueue: Promise.resolve(),
+			sessionEventGeneration: 0,
 			resetSideQuestion: vi.fn(),
 			resetExtensionUI: vi.fn(),
 			applyConnectionStateSnapshot: vi.fn(),
@@ -1050,7 +1325,6 @@ describe("InteractiveMode connection events", () => {
 		expect(rebindOrder).toBeLessThan(renderMessagesOrder);
 		expect(fakeThis.applyConnectionStateSnapshot).toHaveBeenCalledWith(state);
 		expect(fakeThis.resetCurrentSessionRenderState).toHaveBeenCalledWith();
-		expect(fakeThis.rebindCurrentSession).toHaveBeenCalledWith();
 		expect(fakeThis.renderInitialMessages).toHaveBeenCalledWith();
 		expect(fakeThis.ui.requestRender).toHaveBeenCalledWith();
 	});
@@ -1069,7 +1343,9 @@ describe("InteractiveMode connection events", () => {
 				}),
 			},
 			sessionEventQueue: Promise.resolve(),
+			sessionEventGeneration: 0,
 			renderResyncedSession: vi.fn(async () => {}),
+			refreshCommandCatalogForCurrentSession: vi.fn(async () => {}),
 			resetSideQuestion: vi.fn(),
 			resetExtensionUI: vi.fn(),
 			resetCurrentSessionRenderState: vi.fn(),
@@ -1087,15 +1363,66 @@ describe("InteractiveMode connection events", () => {
 		const snapshot = { state: createConnectionState(), messages: [] as [] };
 		await listener?.({ type: "session_resynced", snapshot });
 
+		expect(fakeThis.refreshCommandCatalogForCurrentSession).toHaveBeenCalledOnce();
 		expect(fakeThis.renderResyncedSession).toHaveBeenCalledWith(snapshot);
+		expect(fakeThis.refreshCommandCatalogForCurrentSession.mock.invocationCallOrder[0]).toBeLessThan(
+			fakeThis.renderResyncedSession.mock.invocationCallOrder[0]!,
+		);
 		expect(fakeThis.resetSideQuestion).not.toHaveBeenCalled();
 		expect(fakeThis.resetExtensionUI).not.toHaveBeenCalled();
 		expect(fakeThis.resetCurrentSessionRenderState).not.toHaveBeenCalled();
 		expect(fakeThis.rebindCurrentSession).not.toHaveBeenCalled();
 	});
 
+	test("drops a resync superseded while its command catalog refreshes", async () => {
+		type ConnectionEvent =
+			| { type: "session_resynced"; snapshot: { state: AgentConnectionState; messages: [] } }
+			| { type: "session_replaced"; state: AgentConnectionState; messages: [] };
+		let listener: ((event: ConnectionEvent) => Promise<void> | void) | undefined;
+		let releaseCatalog = () => {};
+		const catalog = new Promise<void>((resolve) => {
+			releaseCatalog = resolve;
+		});
+		const fakeThis = {
+			agentConnection: {
+				subscribe: vi.fn((callback) => {
+					listener = callback;
+					return vi.fn();
+				}),
+			},
+			sessionEventQueue: Promise.resolve(),
+			sessionEventGeneration: 0,
+			refreshCommandCatalogForCurrentSession: vi.fn(() => catalog),
+			renderResyncedSession: vi.fn(async () => {}),
+			resetSideQuestion: vi.fn(),
+			resetExtensionUI: vi.fn(),
+			applyConnectionStateSnapshot: vi.fn(),
+			resetCurrentSessionRenderState: vi.fn(),
+			rebindCurrentSession: vi.fn(async () => {}),
+			renderInitialMessages: vi.fn(async () => {}),
+			ui: { requestRender: vi.fn() },
+			handleEvent: vi.fn(),
+			handleConnectionExtensionUiRequest: vi.fn(),
+			showError: vi.fn(),
+		};
+		(InteractiveMode.prototype as unknown as { subscribeToAgent(this: typeof fakeThis): void }).subscribeToAgent.call(
+			fakeThis,
+		);
+
+		const resync = listener?.({
+			type: "session_resynced",
+			snapshot: { state: createConnectionState(), messages: [] },
+		});
+		await vi.waitFor(() => expect(fakeThis.refreshCommandCatalogForCurrentSession).toHaveBeenCalledOnce());
+		const replacement = listener?.({ type: "session_replaced", state: createConnectionState(), messages: [] });
+		releaseCatalog();
+		await Promise.all([resync, replacement]);
+
+		expect(fakeThis.renderResyncedSession).not.toHaveBeenCalled();
+		expect(fakeThis.renderInitialMessages).toHaveBeenCalledOnce();
+	});
+
 	test("preserves client-local work while rendering a resynchronized snapshot", async () => {
-		const compactionQueue = [{ text: "send after compaction", mode: "followUp" as const }];
 		const sideQuestion = { id: "side-1", status: "running" };
 		const extensionRequests = new Map([["request-1", { cancelLocal: vi.fn() }]]);
 		const activeBashComponent = {};
@@ -1114,17 +1441,18 @@ describe("InteractiveMode connection events", () => {
 				startAssistantStreamingMessage(message);
 			}
 		});
+		const refreshCommandCatalogForCurrentSession = vi.fn(async () => {});
 		const fakeThis = {
-			compactionQueuedMessages: compactionQueue,
 			sideQuestionEvent: sideQuestion,
 			activeConnectionExtensionUiRequests: extensionRequests,
 			activeBashComponent,
+			refreshCommandCatalogForCurrentSession,
 			isAgentCompacting: () => true,
 			isBashRunning: () => true,
 			streamingComponent: {},
 			streamingMessage: {},
 			applyConnectionStateSnapshot: vi.fn(),
-			replaceChildAgentInspector: vi.fn(),
+			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
 				messages: [],
 				thinkingLevel: "medium",
@@ -1133,7 +1461,6 @@ describe("InteractiveMode connection events", () => {
 			renderSessionContext: vi.fn(async () => {}),
 			restoreStreamingMessageFromSnapshot,
 			refreshConnectionQueue: vi.fn(async () => {}),
-			flushCompactionQueue: vi.fn(async () => {}),
 			flushPendingBashComponents: vi.fn(),
 			updateTerminalTitle: vi.fn(),
 			setGoalAnnouncementBaseline: vi.fn(),
@@ -1148,9 +1475,6 @@ describe("InteractiveMode connection events", () => {
 			}
 		).renderResyncedSession.call(fakeThis, snapshot);
 
-		expect((fakeThis as unknown as { compactionQueuedMessages: unknown }).compactionQueuedMessages).toBe(
-			compactionQueue,
-		);
 		expect((fakeThis as unknown as { sideQuestionEvent: unknown }).sideQuestionEvent).toBe(sideQuestion);
 		expect(
 			(fakeThis as unknown as { activeConnectionExtensionUiRequests: unknown }).activeConnectionExtensionUiRequests,
@@ -1160,11 +1484,11 @@ describe("InteractiveMode connection events", () => {
 			(fakeThis as unknown as { renderSessionContext: ReturnType<typeof vi.fn> }).renderSessionContext,
 		).toHaveBeenCalledWith(expect.anything(), { clearChat: true, updateFooter: true });
 		expect(startAssistantStreamingMessage).toHaveBeenCalledWith(streamingMessage);
+		expect(refreshCommandCatalogForCurrentSession).not.toHaveBeenCalled();
 	});
 
-	test("finishes local compaction and bash UI when a resync proves the operations ended", async () => {
+	test("finishes local bash UI when a resync proves the operation ended", async () => {
 		const bashComponent = { setComplete: vi.fn() };
-		const flushCompactionQueue = vi.fn(async () => {});
 		const flushPendingBashComponents = vi.fn();
 		const snapshot: AgentConnectionSnapshot = {
 			state: createConnectionState({ isCompacting: false, isBashRunning: false, isStreaming: false }),
@@ -1177,7 +1501,7 @@ describe("InteractiveMode connection events", () => {
 			isAgentCompacting: () => true,
 			isBashRunning: () => true,
 			applyConnectionStateSnapshot: vi.fn(),
-			replaceChildAgentInspector: vi.fn(),
+			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
 				messages: [],
 				thinkingLevel: "medium",
@@ -1186,7 +1510,6 @@ describe("InteractiveMode connection events", () => {
 			renderSessionContext: vi.fn(async () => {}),
 			restoreStreamingMessageFromSnapshot: vi.fn(),
 			refreshConnectionQueue: vi.fn(async () => {}),
-			flushCompactionQueue,
 			flushPendingBashComponents,
 			updateTerminalTitle: vi.fn(),
 			setGoalAnnouncementBaseline: vi.fn(),
@@ -1201,10 +1524,80 @@ describe("InteractiveMode connection events", () => {
 			}
 		).renderResyncedSession.call(fakeThis, snapshot);
 
-		expect(flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
 		expect(bashComponent.setComplete).toHaveBeenCalledWith(undefined, false);
 		expect((fakeThis as unknown as { activeBashComponent: unknown }).activeBashComponent).toBeUndefined();
 		expect(flushPendingBashComponents).toHaveBeenCalledOnce();
+	});
+
+	test("sends /resume as plain prompt text now that the command is retired", async () => {
+		const fakeThis = createSubmitHandlerHarness();
+
+		await fakeThis.defaultEditor.onSubmit?.("/resume unexpected");
+
+		expect(fakeThis.showError).not.toHaveBeenCalled();
+		expect(fakeThis.requestAgentsView).not.toHaveBeenCalled();
+	});
+
+	test("renderCurrentSessionState waits for replacement handling before rendering", async () => {
+		const calls: string[] = [];
+		const fakeThis = {
+			sessionEventQueue: Promise.resolve().then(() => {
+				calls.push("replacement");
+			}),
+			resetCurrentSessionRenderState: () => calls.push("reset"),
+			renderInitialMessages: async () => calls.push("messages"),
+			refreshConnectionQueue: async () => calls.push("queue"),
+			syncWorkingLoader: () => calls.push("loader"),
+		};
+
+		await (
+			InteractiveMode.prototype as unknown as {
+				renderCurrentSessionState(this: typeof fakeThis): Promise<void>;
+			}
+		).renderCurrentSessionState.call(fakeThis);
+
+		expect(calls).toEqual(["replacement", "reset", "messages", "queue", "loader"]);
+	});
+
+	test("drops a queued source event after the session is replaced", async () => {
+		type Event =
+			| { type: "session_event"; event: { type: string } }
+			| { type: "session_replaced"; state: AgentConnectionState };
+		let listener: ((event: Event) => Promise<void>) | undefined;
+		let releaseQueue: (() => void) | undefined;
+		const blocked = new Promise<void>((resolve) => {
+			releaseQueue = resolve;
+		});
+		const fakeThis = {
+			agentConnection: {
+				subscribe: (callback: (event: Event) => Promise<void>) => {
+					listener = callback;
+					return vi.fn();
+				},
+			},
+			sessionEventQueue: blocked,
+			sessionEventGeneration: 0,
+			handleEvent: vi.fn(async () => {}),
+			resetSideQuestion: vi.fn(),
+			resetExtensionUI: vi.fn(),
+			applyConnectionStateSnapshot: vi.fn(),
+			resetCurrentSessionRenderState: vi.fn(),
+			rebindCurrentSession: vi.fn(async () => {}),
+			renderInitialMessages: vi.fn(async () => {}),
+			ui: { requestRender: vi.fn() },
+			showError: vi.fn(),
+		};
+		(InteractiveMode.prototype as unknown as { subscribeToAgent(this: typeof fakeThis): void }).subscribeToAgent.call(
+			fakeThis,
+		);
+
+		const staleEvent = listener?.({ type: "session_event", event: { type: "message_update" } });
+		const replacement = listener?.({ type: "session_replaced", state: createConnectionState() });
+		releaseQueue?.();
+		await Promise.all([staleEvent, replacement]);
+
+		expect(fakeThis.handleEvent).not.toHaveBeenCalled();
+		expect(fakeThis.renderInitialMessages).toHaveBeenCalledOnce();
 	});
 });
 
@@ -1397,16 +1790,22 @@ describe("InteractiveMode tool event rendering", () => {
 });
 
 describe("InteractiveMode transcript rebuild", () => {
-	test("keeps existing chat visible when session context reload fails", async () => {
-		type RebuildHarness = {
-			chatContainer: Container;
-			agentConnection: { getSessionContext(): Promise<never> };
-			renderSessionContext(): Promise<void>;
-			rebuildChatFromMessages(): Promise<void>;
-		};
+	type RebuildHarness = {
+		chatContainer: Container;
+		agentConnection: { getSessionContext(): Promise<AgentConnectionSessionContext> };
+		renderSessionContext(context: AgentConnectionSessionContext, options: RenderSessionContextOptions): Promise<void>;
+		rebuildChatFromMessages(): Promise<void>;
+	};
+
+	function createRebuildHarness(): RebuildHarness {
 		const fakeThis = Object.create(InteractiveMode.prototype) as RebuildHarness;
 		fakeThis.chatContainer = new Container();
 		fakeThis.chatContainer.addChild(new Container());
+		return fakeThis;
+	}
+
+	test("keeps existing chat visible when session context reload fails", async () => {
+		const fakeThis = createRebuildHarness();
 		fakeThis.agentConnection = {
 			getSessionContext: vi.fn(async () => {
 				throw new Error("context unavailable");
@@ -1418,6 +1817,29 @@ describe("InteractiveMode transcript rebuild", () => {
 
 		expect(fakeThis.chatContainer.children).toHaveLength(1);
 		expect(fakeThis.renderSessionContext).not.toHaveBeenCalled();
+	});
+
+	test("replaces existing chat after session context reload succeeds", async () => {
+		const fakeThis = createRebuildHarness();
+		const staleChild = fakeThis.chatContainer.children[0];
+		const rebuiltChild = new Container();
+		const context: AgentConnectionSessionContext = {
+			messages: [],
+			thinkingLevel: "medium",
+			serviceTier: "default",
+			model: null,
+		};
+		fakeThis.agentConnection = { getSessionContext: vi.fn(async () => context) };
+		fakeThis.renderSessionContext = vi.fn(async (_context, options) => {
+			if (options.clearChat) fakeThis.chatContainer.clear();
+			fakeThis.chatContainer.addChild(rebuiltChild);
+		});
+
+		await fakeThis.rebuildChatFromMessages();
+
+		expect(fakeThis.renderSessionContext).toHaveBeenCalledWith(context, { clearChat: true });
+		expect(fakeThis.chatContainer.children).toEqual([rebuiltChild]);
+		expect(fakeThis.chatContainer.children).not.toContain(staleChild);
 	});
 });
 
@@ -1563,7 +1985,7 @@ describe("InteractiveMode model selection persistence", () => {
 			settingsManager: { setDefaultModelAndProvider(provider: string, modelId: string): void };
 		};
 		footer: { invalidate(): void };
-		childAgentSummary: { invalidate(): void };
+		subagentSummaryLine: { invalidate(): void };
 		patchConnectionState(patch: Partial<AgentConnectionState>): void;
 		updateEditorBorderColor(): void;
 		showStatus(message: string): void;
@@ -1788,7 +2210,7 @@ describe("InteractiveMode model selection persistence", () => {
 			},
 		};
 		fakeThis.footer = { invalidate: vi.fn() };
-		fakeThis.childAgentSummary = { invalidate: vi.fn() };
+		fakeThis.subagentSummaryLine = { invalidate: vi.fn() };
 		fakeThis.patchConnectionState = vi.fn();
 		fakeThis.updateEditorBorderColor = vi.fn();
 		fakeThis.setupAutocompleteProvider = vi.fn();
@@ -1822,7 +2244,7 @@ describe("InteractiveMode model selection persistence", () => {
 			},
 		};
 		fakeThis.footer = { invalidate: vi.fn() };
-		fakeThis.childAgentSummary = { invalidate: vi.fn() };
+		fakeThis.subagentSummaryLine = { invalidate: vi.fn() };
 		fakeThis.patchConnectionState = vi.fn();
 		fakeThis.updateEditorBorderColor = vi.fn();
 
@@ -1849,7 +2271,7 @@ describe("InteractiveMode model selection persistence", () => {
 			},
 		};
 		fakeThis.footer = { invalidate: vi.fn() };
-		fakeThis.childAgentSummary = { invalidate: vi.fn() };
+		fakeThis.subagentSummaryLine = { invalidate: vi.fn() };
 		fakeThis.patchConnectionState = vi.fn();
 		fakeThis.updateEditorBorderColor = vi.fn();
 		fakeThis.showStatus = vi.fn();
@@ -2017,7 +2439,7 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(fakeThis.getCachedModelCandidates()).toEqual([scopedModel, catalogModel]);
 		await expect(fakeThis.findExactModelMatch("catalog")).resolves.toEqual(catalogModel);
 
-		getSelector().handleInput("\x1b[Z");
+		getSelector().handleInput("\x1bs");
 		expect(getSelector().render(120).join("\n")).toContain("catalog");
 		expect(getAvailableModels).not.toHaveBeenCalled();
 		getSelector().handleInput("\t");
@@ -2304,9 +2726,10 @@ describe("InteractiveMode model selection persistence", () => {
 		).invalidateConnectionModelRefresh;
 		fakeThis.applyConnectionStateSnapshot = vi.fn();
 
-		await expect(fakeThis.refreshConnectionCatalog()).rejects.toThrow("commands unavailable");
+		await expect(fakeThis.refreshConnectionCatalog()).resolves.toBeUndefined();
 
-		expect(fakeThis.connectionModels).toEqual([cachedModel]);
+		expect(fakeThis.connectionCommands).toEqual([]);
+		expect(fakeThis.connectionModels).toEqual([expect.objectContaining({ id: "fresh" })]);
 		expect(fakeThis.connectionModelsFetchedAt).toBeGreaterThan(0);
 	});
 
@@ -2327,6 +2750,174 @@ describe("InteractiveMode model selection persistence", () => {
 		getSelector().handleInput("\x1b");
 		await expect(result).resolves.toBeUndefined();
 		expect(hide).toHaveBeenCalledTimes(1);
+	});
+});
+
+function createFakeConnectionSession(commandName: string): AgentSessionRuntime["session"] {
+	return {
+		extensionRunner: { getRegisteredCommands: () => [] },
+		promptTemplates: [
+			{
+				name: commandName,
+				sourceInfo: {
+					path: `/${commandName}.md`,
+					source: `/${commandName}.md`,
+					scope: "project",
+					origin: "top-level",
+				},
+			},
+		],
+		resourceLoader: {
+			getSkills: () => ({ skills: [] }),
+			getPrompts: () => ({ prompts: [] }),
+			getThemes: () => ({ themes: [] }),
+			getExtensions: () => ({ extensions: [], errors: [] }),
+			getAgentsFiles: () => ({ agentsFiles: [] }),
+		},
+		modelRegistry: { refreshModelCatalog: async () => ({ models: [], configuredProviders: [] }) },
+		sessionManager: {
+			getCwd: () => "/tmp/project",
+			getSessionDir: () => "/tmp/sessions",
+			getLeafId: () => null,
+			getEntries: () => [],
+		},
+		getAvailableThinkingLevels: () => ["medium"],
+		getActiveToolNames: () => [],
+		getContextUsage: () => undefined,
+		thinkingLevel: "medium",
+		serviceTier: "default",
+		isStreaming: false,
+		isCompacting: false,
+		isBashRunning: false,
+		retryAttempt: 0,
+		steeringMode: "all",
+		followUpMode: "all",
+		sessionId: commandName,
+		autoCompactionEnabled: true,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+		getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+		goalState: emptyGoalState(),
+		scopedModels: [],
+		subscribe: () => () => {},
+		messages: [],
+	} as unknown as AgentSessionRuntime["session"];
+}
+
+class EventEmittingReplacementRuntime {
+	private rebindSession: Parameters<AgentSessionRuntime["setRebindSession"]>[0];
+
+	constructor(
+		public session: AgentSessionRuntime["session"],
+		private readonly replacement: AgentSessionRuntime["session"],
+	) {}
+
+	setRebindSession(callback?: Parameters<AgentSessionRuntime["setRebindSession"]>[0]): void {
+		this.rebindSession = callback;
+	}
+
+	setBeforeSessionInvalidate(): void {}
+
+	newSession(): Promise<{ cancelled: boolean }> {
+		return this.replaceSession();
+	}
+
+	switchSession(): Promise<{ cancelled: boolean }> {
+		return this.replaceSession();
+	}
+
+	async fork(): Promise<{ cancelled: boolean; selectedText?: string }> {
+		return this.replaceSession();
+	}
+
+	private async replaceSession(): Promise<{ cancelled: boolean }> {
+		this.session = this.replacement;
+		await this.rebindSession?.(this.replacement);
+		return { cancelled: false };
+	}
+}
+
+describe("InteractiveMode session switch command catalog", () => {
+	test.each(["switchSession", "newSession", "fork"] as const)(
+		"refreshes an event-emitting in-process %s replacement exactly once before replay",
+		async (operation) => {
+			const sourceSession = createFakeConnectionSession("source-command");
+			const targetSession = createFakeConnectionSession("target-command");
+			const runtime = new EventEmittingReplacementRuntime(sourceSession, targetSession);
+			const connection = new InProcessAgentConnection(runtime as unknown as AgentSessionRuntime);
+			const getCommands = vi.spyOn(connection, "getCommands");
+			const calls: string[] = [];
+			const fakeThis = {
+				agentConnection: connection,
+				sessionEventQueue: Promise.resolve(),
+				sessionEventGeneration: 0,
+				connectionCommands: await connection.getCommands(),
+				connectionModelsRefreshVersion: 0,
+				bindLocalSessionExtensions: false,
+				uiServices: { getThemes: () => [] },
+				toolDefinitionCache: { clear: vi.fn() },
+				applyRuntimeSettings: vi.fn(),
+				applyConnectionModelCatalog: vi.fn(),
+				showLoadedResources: vi.fn(),
+				refreshHeartbeatCatalog: vi.fn(async () => {}),
+				updateAvailableProviderCount: vi.fn(async () => {}),
+				updateEditorBorderColor: vi.fn(),
+				updateTerminalTitle: vi.fn(),
+				setGoalAnnouncementBaseline: vi.fn(),
+				syncGoalTray: vi.fn(),
+				getGoalState: () => emptyGoalState(),
+				resetSideQuestion: vi.fn(),
+				resetExtensionUI: vi.fn(),
+				applyConnectionStateSnapshot: vi.fn(),
+				resetCurrentSessionRenderState: vi.fn(() => calls.push("reset")),
+				setupAutocompleteProvider: vi.fn(() => calls.push("catalog")),
+				renderInitialMessages: vi.fn(async () => {
+					calls.push("render");
+					expect(fakeThis.connectionCommands.map((command) => command.name)).toEqual(["target-command"]);
+				}),
+				refreshConnectionQueue: vi.fn(async () => {}),
+				syncWorkingLoader: vi.fn(),
+				ui: { requestRender: vi.fn() },
+				handleEvent: vi.fn(),
+				handleConnectionExtensionUiRequest: vi.fn(),
+				showError: vi.fn(),
+			};
+			Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+			const interactiveHarness = fakeThis as typeof fakeThis & {
+				subscribeToAgent(): void;
+				renderCurrentSessionState(): Promise<void>;
+			};
+			interactiveHarness.subscribeToAgent();
+
+			if (operation === "switchSession") await connection.switchSession("/target/session.jsonl");
+			else if (operation === "newSession") await connection.newSession();
+			else await connection.fork("entry-1");
+			await interactiveHarness.renderCurrentSessionState();
+
+			expect(calls).toEqual(["reset", "catalog", "render", "reset", "render"]);
+			expect(getCommands).toHaveBeenCalledTimes(2); // initial catalog + one replacement refresh
+		},
+	);
+
+	test("keeps catalog refresh failures nonfatal and drops stale dynamic commands", async () => {
+		const setupAutocompleteProvider = vi.fn();
+		const fakeThis = Object.create(InteractiveMode.prototype) as {
+			agentConnection: { getCommands(): Promise<never> };
+			connectionCommands: unknown[];
+			setupAutocompleteProvider(): void;
+			refreshCommandCatalogForCurrentSession(): Promise<void>;
+		};
+		fakeThis.agentConnection = {
+			getCommands: vi.fn(async () => {
+				throw new Error("catalog unavailable");
+			}),
+		};
+		fakeThis.connectionCommands = [{ name: "stale-command" }];
+		fakeThis.setupAutocompleteProvider = setupAutocompleteProvider;
+
+		await expect(fakeThis.refreshCommandCatalogForCurrentSession()).resolves.toBeUndefined();
+
+		expect(fakeThis.connectionCommands).toEqual([]);
+		expect(setupAutocompleteProvider).toHaveBeenCalledOnce();
 	});
 });
 
@@ -2381,6 +2972,35 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 	const markOnboardingShown = (InteractiveMode.prototype as unknown as OnboardingHarness).markOnboardingShown;
 	const runStartupOnboarding = (InteractiveMode.prototype as unknown as OnboardingHarness).runStartupOnboarding;
 	const runOnboardingFlow = (InteractiveMode.prototype as unknown as OnboardingHarness).runOnboardingFlow;
+	const startupRunResult = {
+		type: "agents_view",
+		source: {
+			activeSessionId: undefined,
+			sessionFile: undefined,
+			sessionId: "",
+			sessionName: undefined,
+			cwd: "/tmp/project",
+		},
+	};
+	function createStartupRunHarness(
+		options: Record<string, unknown>,
+		overrides: Record<string, unknown> = {},
+	): Record<string, unknown> & { getUserInput: ReturnType<typeof vi.fn> } {
+		return {
+			init: vi.fn(async () => {}),
+			options: { agentsViewOwnsStartupNotices: true, ...options },
+			modelRegistry: { getError: vi.fn(() => undefined) },
+			runStartupOnboarding: vi.fn(async () => true),
+			getModelFallbackWarningAction: vi.fn(() => "suppress"),
+			maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(),
+			getUserInput: vi.fn(() => new Promise<void>(() => {})),
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+			getCurrentCwd: () => startupRunResult.source.cwd,
+			sessionHasMessages: false,
+			...overrides,
+		};
+	}
 
 	const primeModel: AgentConnectionModel = {
 		id: "openai/gpt-5.5",
@@ -2400,41 +3020,591 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		maxTokens: 128000,
 	} as AgentConnectionModel;
 
-	test("defers CLI initial prompts until a model is selected after onboarding dismissal", async () => {
-		let currentModel: AgentConnectionModel | undefined;
-		const prompt = vi.fn(async () => {});
-		const getUserInput = vi
-			.fn<() => Promise<string | undefined>>()
-			.mockImplementationOnce(async () => {
-				currentModel = primeModel;
-				return "interactive prompt";
-			})
-			.mockResolvedValueOnce(undefined);
-		const fakeThis = {
-			init: vi.fn(async () => {}),
-			options: {
-				agentsViewOwnsStartupNotices: true,
-				initialMessage: "initial prompt",
+	test("defers, retries transient startup failures, and skips a persistently failing prompt", async () => {
+		vi.useFakeTimers();
+		const inputDone = createDeferred<void>();
+		let model: AgentConnectionModel | undefined;
+		let firstAttempts = 0;
+		let secondAttempts = 0;
+		const prompt = vi.fn((message: string) => {
+			if (message === "first" && firstAttempts++ < 2) {
+				return Promise.reject(new Error(`transient failure ${firstAttempts}`));
+			}
+			if (message === "second") {
+				return Promise.reject(new Error(`admission failure ${++secondAttempts}`));
+			}
+			return Promise.resolve();
+		});
+		const showError = vi.fn();
+		const submitHarness = createSubmitHandlerHarness({
+			agentConnection: {
+				prompt,
+				executeBash: vi.fn(async () => {}),
+				getState: vi.fn(async () => ({ isBashRunning: false })),
 			},
-			modelRegistry: { getError: vi.fn(() => undefined) },
-			runStartupOnboarding: vi.fn(async () => true),
-			getModelFallbackWarningAction: vi.fn(() => "suppress"),
-			getCurrentModel: vi.fn(() => currentModel),
-			maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(),
-			getUserInput,
-			collectImagesFor: vi.fn(() => []),
-			agentConnection: { prompt },
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-			returnToAgentsViewRequested: false,
-			sessionHasMessages: false,
+		});
+		const fakeThis = Object.assign(
+			submitHarness,
+			createStartupRunHarness(
+				{ initialMessage: "first", initialMessages: ["second", "third"] },
+				{
+					getCurrentModel: () => model,
+					getUserInput: vi.fn(() => inputDone.promise),
+					agentConnection: submitHarness.agentConnection,
+					showError,
+				},
+			),
+		);
+
+		try {
+			const run = InteractiveMode.prototype.run.call(fakeThis as never);
+			await vi.advanceTimersByTimeAsync(250);
+			expect(prompt).not.toHaveBeenCalled();
+
+			model = primeModel;
+			const userSubmission = fakeThis.defaultEditor.onSubmit?.("user");
+			await vi.advanceTimersByTimeAsync(1_250);
+			await userSubmission;
+
+			const steer = {
+				images: undefined,
+				streamingBehavior: "steer",
+				queueIfBusy: true,
+				signal: expect.any(AbortSignal),
+			};
+			const followUp = {
+				images: undefined,
+				streamingBehavior: "followUp",
+				queueIfBusy: true,
+				signal: expect.any(AbortSignal),
+			};
+			expect(prompt.mock.calls).toEqual([
+				["first", steer],
+				["first", steer],
+				["first", steer],
+				["second", followUp],
+				["second", followUp],
+				["second", followUp],
+				["third", followUp],
+				["user", { images: [], streamingBehavior: "steer", queueIfBusy: true }],
+			]);
+			expect(showError.mock.calls).toEqual([
+				["transient failure 1"],
+				["transient failure 2"],
+				["admission failure 1"],
+				["admission failure 2"],
+				["Skipping startup prompt after 3 failed attempts: admission failure 3"],
+			]);
+
+			// Delivery settled: the retry cadence stops instead of re-prompting.
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(prompt).toHaveBeenCalledTimes(8);
+			inputDone.resolve(undefined);
+			await expect(run).resolves.toEqual(startupRunResult);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test.each(["unsupported", "unknown"] as const)(
+		"reports %s startup admission once and retains every remaining prompt with collision-safe images",
+		async (status) => {
+			const inputDone = createDeferred<void>();
+			const firstImage = { type: "image", data: "first", mimeType: "image/png" } as const;
+			const secondImage = { type: "image", data: "second", mimeType: "image/jpeg" } as const;
+			let rejectStartup!: (error: Error) => void;
+			const startupAdmission = new Promise<void>((_resolve, reject) => {
+				rejectStartup = reject;
+			});
+			const prompt = vi.fn(() => startupAdmission);
+			const promptStashState: PromptStashState = { stash: { text: "existing draft [image #3]" } };
+			const submitHarness = createSubmitHandlerHarness({
+				promptStashState,
+				agentConnection: {
+					prompt,
+					executeBash: vi.fn(async () => {}),
+					getState: vi.fn(async () => ({ isBashRunning: false })),
+				},
+				pastedImages: new Map([[1, { type: "image", data: "existing", mimeType: "image/png" }]]),
+				nextImageMarkerId: 1,
+			});
+			const fakeThis = Object.assign(
+				submitHarness,
+				createStartupRunHarness(
+					{
+						initialMessage: "startup [image #1]",
+						initialImages: [firstImage],
+						initialPrompts: [{ text: "later [image #2]", images: [secondImage] }, { text: "last [image #4]" }],
+					},
+					{
+						getCurrentModel: () => primeModel,
+						getUserInput: vi.fn(() => inputDone.promise),
+						agentConnection: submitHarness.agentConnection,
+					},
+				),
+			);
+
+			const run = InteractiveMode.prototype.run.call(fakeThis as never);
+			await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+			const blockedSubmission = fakeThis.defaultEditor.onSubmit?.("blocked user");
+			rejectStartup(new AgentConnectionPromptAdmissionError("daemon admission uncertain", status));
+			await blockedSubmission;
+			// An erroneous retry would already be scheduled; drain continuations.
+			for (let i = 0; i < 25; i++) await new Promise((resolve) => setImmediate(resolve));
+			expect(prompt).toHaveBeenCalledOnce();
+			expect(fakeThis.showError).toHaveBeenCalledWith("daemon admission uncertain");
+			expect(fakeThis.promptStashState.stash).toEqual({
+				text: "startup [image #5] [image #6]",
+				images: [[6, firstImage]],
+			});
+			expect(fakeThis.promptStashState.queuedStashes).toEqual([
+				{ text: "later [image #2] [image #7]", images: [[7, secondImage]] },
+				{ text: "last [image #4]" },
+				{ text: "existing draft [image #3]" },
+				{ text: "blocked user" },
+			]);
+			expect(fakeThis.pastedImages.get(1)).toEqual({ type: "image", data: "existing", mimeType: "image/png" });
+			expect(fakeThis.pastedImages.get(5)).toBeUndefined();
+			expect(fakeThis.pastedImages.get(6)).toBe(firstImage);
+			expect(fakeThis.pastedImages.get(7)).toBe(secondImage);
+			inputDone.resolve(undefined);
+			await expect(run).resolves.toMatchObject({ type: "agents_view" });
+		},
+	);
+
+	test("does not retain a startup prompt already owned by the session", async () => {
+		const inputDone = createDeferred<void>();
+		const prompt = vi
+			.fn()
+			.mockRejectedValueOnce(new AgentConnectionPromptAdmissionError("session owns prompt", "owned"))
+			.mockResolvedValueOnce(undefined);
+		const submitHarness = createSubmitHandlerHarness({
+			agentConnection: {
+				prompt,
+				executeBash: vi.fn(async () => {}),
+				getState: vi.fn(async () => ({ isBashRunning: false })),
+			},
+		});
+		const fakeThis = Object.assign(
+			submitHarness,
+			createStartupRunHarness(
+				{ initialMessages: ["owned startup", "next startup"] },
+				{
+					getCurrentModel: () => primeModel,
+					getUserInput: vi.fn(() => inputDone.promise),
+					agentConnection: submitHarness.agentConnection,
+				},
+			),
+		);
+
+		const run = InteractiveMode.prototype.run.call(fakeThis as never);
+		await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+		expect(prompt.mock.calls.map(([message]) => message)).toEqual(["owned startup", "next startup"]);
+		expect(fakeThis.promptStashState.stash).toBeUndefined();
+		inputDone.resolve(undefined);
+		await expect(run).resolves.toMatchObject({ type: "agents_view" });
+	});
+
+	test.each(["typing", "Alt+Enter"] as const)(
+		"preserves %s during the startup admission barrier",
+		async (scenario) => {
+			vi.useFakeTimers();
+			let model: AgentConnectionModel | undefined;
+			let editorText = "first user prompt";
+			let startupAttempts = 0;
+			const startupAdmission = createDeferred<void>();
+			const inputDone = createDeferred<void>();
+			const prompt = vi.fn((message: string) => {
+				if (message !== "startup") return Promise.resolve();
+				startupAttempts++;
+				return startupAttempts === 1
+					? Promise.reject(new Error("transient admission failure"))
+					: startupAdmission.promise;
+			});
+			const submitHarness = createSubmitHandlerHarness({
+				editor: {
+					getText: () => editorText,
+					getExpandedText: () => editorText,
+					setText: (text) => {
+						editorText = text;
+					},
+				},
+				agentConnection: {
+					prompt,
+					executeBash: vi.fn(async () => {}),
+					getState: vi.fn(async () => ({ isBashRunning: false })),
+				},
+			});
+			const fakeThis = Object.assign(
+				submitHarness,
+				createStartupRunHarness(
+					{ initialMessage: "startup" },
+					{
+						getCurrentModel: () => model,
+						getUserInput: vi.fn(() => inputDone.promise),
+						agentConnection: submitHarness.agentConnection,
+					},
+				),
+			);
+
+			try {
+				const run = InteractiveMode.prototype.run.call(fakeThis as never);
+				await vi.advanceTimersByTimeAsync(250);
+				fakeThis.editor.onSubmit = fakeThis.defaultEditor.onSubmit;
+				const submit = () =>
+					scenario === "typing"
+						? fakeThis.defaultEditor.onSubmit?.(editorText)
+						: (
+								InteractiveMode.prototype as unknown as {
+									handleFollowUp(this: SubmitHandlerHarness): Promise<void>;
+								}
+							).handleFollowUp.call(fakeThis);
+				const firstSubmission = submit();
+				await Promise.resolve();
+				expect(editorText).toBe("");
+				if (scenario === "typing") editorText = "typing during startup wait";
+				const duplicate = scenario === "Alt+Enter" ? submit() : undefined;
+				expect(prompt).not.toHaveBeenCalled();
+				model = primeModel;
+				await vi.advanceTimersByTimeAsync(250);
+				expect(prompt.mock.calls.map(([message]) => message)).toEqual(["startup"]);
+				await vi.advanceTimersByTimeAsync(249);
+				expect(prompt).toHaveBeenCalledOnce();
+				await vi.advanceTimersByTimeAsync(1);
+				expect(prompt.mock.calls.map(([message]) => message)).toEqual(["startup", "startup"]);
+				startupAdmission.resolve(undefined);
+				await Promise.all([firstSubmission, duplicate]);
+				expect(prompt.mock.calls.map(([message]) => message)).toEqual(["startup", "startup", "first user prompt"]);
+				expect(editorText).toBe(scenario === "typing" ? "typing during startup wait" : "");
+				expect(prompt.mock.calls[0]).toEqual([
+					"startup",
+					{
+						images: undefined,
+						streamingBehavior: "steer",
+						queueIfBusy: true,
+						signal: expect.any(AbortSignal),
+					},
+				]);
+				inputDone.resolve(undefined);
+				await expect(run).resolves.toEqual(startupRunResult);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	test("aborts an actually blocked startup admission when the run lifecycle ends", async () => {
+		const inputDone = createDeferred<void>();
+		let blockedSignal: AbortSignal | undefined;
+		const prompt = vi.fn((_message: string, options?: { signal?: AbortSignal }) => {
+			blockedSignal = options?.signal;
+			return new Promise<void>((_resolve, reject) => {
+				options?.signal?.addEventListener("abort", () => reject(new Error("admission aborted")), { once: true });
+			});
+		});
+		const fakeThis = Object.assign(
+			createSubmitHandlerHarness({
+				agentConnection: {
+					prompt,
+					executeBash: vi.fn(async () => {}),
+					getState: vi.fn(async () => ({ isBashRunning: false })),
+				},
+			}),
+			createStartupRunHarness(
+				{ initialMessage: "startup" },
+				{
+					getCurrentModel: () => primeModel,
+					getUserInput: vi.fn(() => inputDone.promise),
+				},
+			),
+		);
+
+		const run = InteractiveMode.prototype.run.call(fakeThis as never);
+		await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+		expect(blockedSignal?.aborted).toBe(false);
+		inputDone.resolve(undefined);
+
+		await expect(run).resolves.toMatchObject({ type: "agents_view" });
+		expect(blockedSignal?.aborted).toBe(true);
+		expect(fakeThis.showError).not.toHaveBeenCalled();
+	});
+
+	test.each([false, true])(
+		"lifecycle cancellation retains the submitted draft with exact fidelity (existing stash: %s)",
+		async (hasExistingStash) => {
+			const inputDone = createDeferred<void>();
+			const store = new ClientPromptStashStore();
+			const promptStashState = store.forSession("session-a");
+			if (hasExistingStash) promptStashState.stash = { text: "older durable draft" };
+			const image = { type: "image", data: "base64", mimeType: "image/png" } as const;
+			const pasteSnapshot = { pastes: [[1, "expanded paste"]], pasteCounter: 2 } as const;
+			const submittedText = "submitted [paste #1] [image #7]";
+			let editorText = submittedText;
+			const submitHarness = createSubmitHandlerHarness({
+				editor: {
+					getText: () => editorText,
+					getExpandedText: () => "submitted expanded paste [image #7]",
+					getPasteSnapshot: () => pasteSnapshot,
+					setText: (text) => {
+						editorText = text;
+					},
+				},
+				promptStashState,
+				pastedImages: new Map([[7, image]]),
+				getPromptStashImages: () => [[7, image]],
+			});
+			delete submitHarness.promptStash;
+			const fakeThis = Object.assign(
+				submitHarness,
+				createStartupRunHarness(
+					{ initialMessage: "startup" },
+					{
+						getCurrentModel: () => undefined,
+						getUserInput: vi.fn(() => inputDone.promise),
+						agentConnection: submitHarness.agentConnection,
+					},
+				),
+			);
+
+			const run = InteractiveMode.prototype.run.call(fakeThis as never);
+			while (!fakeThis.admitPendingStartupPrompts) await Promise.resolve();
+			fakeThis.latestEditorPromptStash = {
+				text: submittedText,
+				expandedText: "submitted expanded paste [image #7]",
+				pasteSnapshot,
+				images: [[7, image]],
+			};
+			// pi-tui clears and emits onChange before invoking onSubmit.
+			editorText = "";
+			const submission = fakeThis.defaultEditor.onSubmit?.("submitted expanded paste [image #7]");
+			await Promise.resolve();
+			expect(editorText).toBe("");
+			fakeThis.returnToAgentsViewRequested = true;
+			fakeThis.isShuttingDown = true;
+			inputDone.resolve(undefined);
+
+			await expect(run).resolves.toMatchObject({ type: "agents_view" });
+			await submission;
+
+			expect(fakeThis.agentConnection.prompt).not.toHaveBeenCalled();
+			expect(editorText).toBe("");
+			const retained = hasExistingStash ? promptStashState.queuedStashes?.[0] : promptStashState.stash;
+			expect(promptStashState.stash?.text).toBe(hasExistingStash ? "older durable draft" : submittedText);
+			expect(retained).toEqual({
+				text: submittedText,
+				expandedText: "submitted expanded paste [image #7]",
+				pasteSnapshot,
+				images: [[7, image]],
+			});
+		},
+	);
+
+	test("a barrier-paused submit retains its draft in the original session's stash after a rebind", async () => {
+		const barrier = createDeferred<"admitted" | "lifecycle-cancelled">();
+		const oldState: PromptStashState = {};
+		const newState: PromptStashState = {};
+		const prompt = vi.fn(async () => {});
+		const fakeThis = createSubmitHandlerHarness({
+			promptStashState: oldState,
+			admitPendingStartupPrompts: () => barrier.promise,
+			agentConnection: {
+				prompt,
+				executeBash: vi.fn(async () => {}),
+				getState: vi.fn(async () => ({ isBashRunning: false })),
+			},
+		});
+		(fakeThis as unknown as { promptStashSessionId?: string }).promptStashSessionId = "session-old";
+
+		const submission = fakeThis.defaultEditor.onSubmit?.("typed for the old session");
+		await Promise.resolve();
+		// /new rebinds the live fields while the submit is paused on the barrier.
+		(fakeThis as unknown as { promptStashSessionId?: string }).promptStashSessionId = "session-new";
+		fakeThis.promptStashState = newState;
+		barrier.resolve("admitted");
+		await submission;
+
+		expect(prompt).not.toHaveBeenCalled();
+		expect(oldState.stash).toEqual({ text: "typed for the old session" });
+		expect(newState.stash).toBeUndefined();
+	});
+
+	test("defers stash-store release until lifecycle-retained submissions settle", () => {
+		const store = new ClientPromptStashStore();
+		const state = store.forSession("session-a");
+		const fakeThis = {
+			inputSubmissionsPending: 1,
+			pendingPromptStashReleases: [] as { sessionId: string; state: unknown }[],
+			promptStashStore: store,
+			promptStashSessionId: "session-a",
+			promptStashState: state,
+			retainedSubmissionGenerations: new WeakMap(),
+		};
+		const release = (InteractiveMode.prototype as unknown as { releasePromptStashSession(this: unknown): void })
+			.releasePromptStashSession;
+		const retain = (
+			InteractiveMode.prototype as unknown as {
+				retainSubmittedDraft(this: unknown, stash: { text: string }, generation: number): void;
+			}
+		).retainSubmittedDraft;
+
+		release.call(fakeThis);
+		expect(fakeThis.pendingPromptStashReleases).toEqual([{ sessionId: "session-a", state }]);
+		expect(store.forSession("session-a")).toBe(state);
+		retain.call(fakeThis, { text: "retained" }, 1);
+		fakeThis.inputSubmissionsPending = 0;
+		release.call(fakeThis);
+		expect(store.forSession("session-a")).toBe(state);
+		expect(state.stash).toEqual({ text: "retained" });
+	});
+
+	test("a deferred release targets the session captured at deferral, not a rebound one", () => {
+		const store = new ClientPromptStashStore();
+		const oldState = store.forSession("session-old");
+		const fakeThis = {
+			inputSubmissionsPending: 1,
+			pendingPromptStashReleases: [] as { sessionId: string; state: unknown }[],
+			promptStashStore: store,
+			promptStashSessionId: "session-old",
+			promptStashState: oldState,
+		};
+		const methods = InteractiveMode.prototype as unknown as {
+			releasePromptStashSession(this: unknown): void;
+			completeDeferredPromptStashRelease(this: unknown): void;
 		};
 
-		await expect(InteractiveMode.prototype.run.call(fakeThis as never)).resolves.toBe("agents_view");
+		methods.releasePromptStashSession.call(fakeThis);
+		const newState = store.forSession("session-new");
+		newState.stash = { text: "new session draft" };
+		fakeThis.promptStashSessionId = "session-new";
+		fakeThis.promptStashState = newState;
 
-		expect(prompt).toHaveBeenNthCalledWith(1, "initial prompt", { images: undefined });
-		expect(prompt).toHaveBeenNthCalledWith(2, "interactive prompt", { streamingBehavior: "steer", images: [] });
-		expect(prompt).toHaveBeenCalledTimes(2);
+		fakeThis.inputSubmissionsPending = 0;
+		methods.completeDeferredPromptStashRelease.call(fakeThis);
+
+		expect(store.forSession("session-old")).not.toBe(oldState);
+		expect(store.forSession("session-new")).toBe(newState);
+		expect(newState.stash).toEqual({ text: "new session draft" });
+	});
+
+	test("a teardown release after a rebind keeps both deferred session releases", () => {
+		const store = new ClientPromptStashStore();
+		const oldState = store.forSession("session-old");
+		const fakeThis = {
+			inputSubmissionsPending: 1,
+			pendingPromptStashReleases: [] as { sessionId: string; state: unknown }[],
+			promptStashStore: store,
+			promptStashSessionId: "session-old",
+			promptStashState: oldState,
+		};
+		const methods = InteractiveMode.prototype as unknown as {
+			releasePromptStashSession(this: unknown): void;
+			completeDeferredPromptStashRelease(this: unknown): void;
+		};
+
+		// /new rebind defers the old session's release...
+		methods.releasePromptStashSession.call(fakeThis);
+		const newState = store.forSession("session-new");
+		fakeThis.promptStashSessionId = "session-new";
+		fakeThis.promptStashState = newState;
+		// ...then teardown defers the rebound session's release while the same
+		// submission is still pending. The first pair must not be overwritten.
+		methods.releasePromptStashSession.call(fakeThis);
+		expect(fakeThis.pendingPromptStashReleases.map((pending) => pending.sessionId)).toEqual([
+			"session-old",
+			"session-new",
+		]);
+
+		fakeThis.inputSubmissionsPending = 0;
+		methods.completeDeferredPromptStashRelease.call(fakeThis);
+
+		expect(store.forSession("session-old")).not.toBe(oldState);
+		expect(store.forSession("session-new")).not.toBe(newState);
+	});
+
+	test("orders retained drafts by submission rather than rejection", () => {
+		const state: PromptStashState = {};
+		const fakeThis = {
+			promptStashState: state,
+			retainedSubmissionGenerations: new WeakMap(),
+		};
+		Object.defineProperty(fakeThis, "promptStash", {
+			get: () => state.stash,
+			set: (stash) => {
+				state.stash = stash;
+			},
+		});
+		const retain = (
+			InteractiveMode.prototype as unknown as {
+				retainSubmittedDraft(this: unknown, stash: { text: string }, generation: number): void;
+			}
+		).retainSubmittedDraft;
+
+		retain.call(fakeThis, { text: "second" }, 2);
+		retain.call(fakeThis, { text: "first" }, 1);
+		expect(state.stash).toEqual({ text: "first" });
+		expect(state.queuedStashes).toEqual([{ text: "second" }]);
+	});
+
+	test("retains every blocked submission in submission order on lifecycle cancellation", async () => {
+		const inputDone = createDeferred<void>();
+		const promptStashState: PromptStashState = {};
+		let editorText = "first rich draft";
+		const submitHarness = createSubmitHandlerHarness({
+			editor: {
+				getText: () => editorText,
+				setText: (text) => {
+					editorText = text;
+				},
+			},
+			promptStashState,
+		});
+		delete submitHarness.promptStash;
+		const fakeThis = Object.assign(
+			submitHarness,
+			createStartupRunHarness(
+				{ initialMessage: "startup" },
+				{
+					getCurrentModel: () => undefined,
+					getUserInput: vi.fn(() => inputDone.promise),
+					agentConnection: submitHarness.agentConnection,
+				},
+			),
+		);
+
+		const run = InteractiveMode.prototype.run.call(fakeThis as never);
+		while (!fakeThis.admitPendingStartupPrompts) await Promise.resolve();
+		fakeThis.latestEditorPromptStash = { text: "first rich draft", expandedText: "first expanded" };
+		editorText = "";
+		const first = fakeThis.defaultEditor.onSubmit?.("first rich draft");
+		fakeThis.latestEditorPromptStash = { text: "second rich draft", expandedText: "second expanded" };
+		const second = fakeThis.defaultEditor.onSubmit?.("second rich draft");
+		await Promise.resolve();
+
+		fakeThis.returnToAgentsViewRequested = true;
+		fakeThis.isShuttingDown = true;
+		inputDone.resolve(undefined);
+		await expect(run).resolves.toMatchObject({ type: "agents_view" });
+		await Promise.all([first, second]);
+
+		expect(promptStashState.stash).toEqual({ text: "first rich draft", expandedText: "first expanded" });
+		expect(promptStashState.queuedStashes).toEqual([{ text: "second rich draft", expandedText: "second expanded" }]);
+	});
+
+	test("keeps the TUI alive while direct editor submissions own prompt delivery", async () => {
+		const prompt = vi.fn();
+		const fakeThis = createStartupRunHarness(
+			{},
+			{
+				getCurrentModel: vi.fn(() => primeModel),
+				getUserInput: vi.fn(async () => undefined),
+				agentConnection: { prompt },
+				returnToAgentsViewRequested: false,
+			},
+		);
+
+		await expect(InteractiveMode.prototype.run.call(fakeThis as never)).resolves.toEqual(startupRunResult);
+		expect(fakeThis.getUserInput).toHaveBeenCalledOnce();
+		expect(prompt).not.toHaveBeenCalled();
 	});
 
 	function createPrimeCliHarness(shown: boolean): OnboardingFake {
@@ -2931,71 +4101,83 @@ describe("InteractiveMode live context usage", () => {
 		expect(prototype.getConnectionContextUsage.call(fakeThis)).toBeUndefined();
 	});
 
-	test("refreshConnectionContextUsage drops stale stats after a session switch", async () => {
-		type RefreshHarness = {
-			agentConnection: { getSessionStats(): Promise<{ contextUsage: unknown }> };
-			connectionState: { sessionId?: string; contextUsage?: unknown };
-			activityTracker: { getStatus(): { tokens: number } };
-			contextUsageTokenBaseline: number;
-			patchConnectionState(patch: Record<string, unknown>): void;
-			refreshConnectionContextUsage(): Promise<void>;
+	type RefreshHarness = {
+		agentConnection: { getSessionStats(): Promise<{ contextUsage: unknown } | undefined> };
+		connectionState: { sessionId?: string; contextUsage?: unknown };
+		activityTracker: { getStatus(): { tokens: number } };
+		contextUsageTokenBaseline: number;
+		contextUsageRefresh: { generation: number; lastSuccessGeneration: number };
+		patchConnectionState(patch: Record<string, unknown>): void;
+		refreshConnectionContextUsage(): Promise<void>;
+	};
+	const refresh = (InteractiveMode.prototype as unknown as RefreshHarness).refreshConnectionContextUsage;
+
+	function createRefreshHarness(
+		getSessionStats: RefreshHarness["agentConnection"]["getSessionStats"],
+	): RefreshHarness & { patched: Record<string, unknown>[] } {
+		const fakeThis = Object.create(InteractiveMode.prototype) as RefreshHarness & {
+			patched: Record<string, unknown>[];
 		};
-		const refresh = (InteractiveMode.prototype as unknown as RefreshHarness).refreshConnectionContextUsage;
-		const fakeThis = Object.create(InteractiveMode.prototype) as RefreshHarness;
-		const patched: Record<string, unknown>[] = [];
+		fakeThis.patched = [];
 		fakeThis.activityTracker = { getStatus: () => ({ tokens: 0 }) };
 		fakeThis.contextUsageTokenBaseline = 0;
+		fakeThis.contextUsageRefresh = { generation: 0, lastSuccessGeneration: 0 };
 		fakeThis.connectionState = { sessionId: "session-A", contextUsage: undefined };
-		fakeThis.patchConnectionState = (p) => patched.push(p);
-		fakeThis.agentConnection = {
-			getSessionStats: async () => {
-				// User switches sessions while the stats call is in flight.
-				fakeThis.connectionState = { sessionId: "session-B", contextUsage: undefined };
-				return { contextUsage: { contextWindow: 100_000, tokens: 50_000, percent: 50 } };
-			},
-		};
+		fakeThis.patchConnectionState = (patch) => fakeThis.patched.push(patch);
+		fakeThis.agentConnection = { getSessionStats };
+		return fakeThis;
+	}
+
+	test("refreshConnectionContextUsage drops stale stats after a session switch", async () => {
+		let fakeThis: ReturnType<typeof createRefreshHarness>;
+		fakeThis = createRefreshHarness(async () => {
+			// User switches sessions while the stats call is in flight.
+			fakeThis.connectionState = { sessionId: "session-B", contextUsage: undefined };
+			return { contextUsage: { contextWindow: 100_000, tokens: 50_000, percent: 50 } };
+		});
 
 		await refresh.call(fakeThis);
 
 		// Stats belonged to session-A; must not overwrite session-B.
-		expect(patched).toHaveLength(0);
+		expect(fakeThis.patched).toHaveLength(0);
 	});
-});
 
-describe("InteractiveMode.handleGoalStatusCommand", () => {
-	test("prints current goal details without queuing through the agent", () => {
-		type GoalStatusCommandHarness = {
-			connectionState: { goal: GoalState };
-			chatContainer: Container;
-			ui: { requestRender(): void };
-			handleGoalStatusCommand(): void;
-			formatGoalElapsed(seconds: number): string;
-		};
-		const fakeThis = Object.create(InteractiveMode.prototype) as GoalStatusCommandHarness;
-		fakeThis.connectionState = {
-			goal: {
-				active: true,
-				status: "active",
-				objective: "ship the feature",
-				tokenBudget: 1000,
-				tokensUsed: 125,
-				timeUsedSeconds: 65,
-				continuationsUsed: 2,
-			},
-		};
-		fakeThis.chatContainer = new Container();
-		fakeThis.ui = { requestRender: vi.fn() };
+	test("refreshConnectionContextUsage keeps a newer successful same-session response", async () => {
+		const first = createDeferred<{ contextUsage: unknown }>();
+		const second = createDeferred<{ contextUsage: unknown }>();
+		let request = 0;
+		const fakeThis = createRefreshHarness(() => (++request === 1 ? first.promise : second.promise));
 
-		fakeThis.handleGoalStatusCommand();
+		const olderRefresh = refresh.call(fakeThis);
+		const newerRefresh = refresh.call(fakeThis);
+		second.resolve({ contextUsage: { tokens: 10, contextWindow: 100, percent: 10 } });
+		await newerRefresh;
+		first.resolve({ contextUsage: { tokens: 90, contextWindow: 100, percent: 90 } });
+		await olderRefresh;
 
-		const rendered = normalizeRenderedOutput(fakeThis.chatContainer);
-		expect(rendered).toContain("Goal");
-		expect(rendered).toContain("Status: active");
-		expect(rendered).toContain("Objective: ship the feature");
-		expect(rendered).toContain("Time: 1m 05s");
-		expect(rendered).toContain("Tokens: 125 / 1,000");
-		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+		expect(fakeThis.patched).toEqual([{ contextUsage: { tokens: 10, contextWindow: 100, percent: 10 } }]);
 	});
+
+	test.each(["failure", "no stats"] as const)(
+		"refreshConnectionContextUsage lets an older successful response survive a newer %s",
+		async (newerResult) => {
+			const first = createDeferred<{ contextUsage: unknown }>();
+			let request = 0;
+			const fakeThis = createRefreshHarness(() => {
+				if (++request === 1) return first.promise;
+				return newerResult === "failure"
+					? Promise.reject(new Error("stats unavailable"))
+					: Promise.resolve(undefined);
+			});
+
+			const olderRefresh = refresh.call(fakeThis);
+			await refresh.call(fakeThis);
+			first.resolve({ contextUsage: { tokens: 90, contextWindow: 100, percent: 90 } });
+			await olderRefresh;
+
+			expect(fakeThis.patched).toEqual([{ contextUsage: { tokens: 90, contextWindow: 100, percent: 90 } }]);
+		},
+	);
 });
 
 describe("truncatePathMiddle", () => {
@@ -3009,16 +4191,14 @@ describe("truncatePathMiddle", () => {
 });
 
 describe("InteractiveMode.setToolsExpanded", () => {
-	test("applies expansion state to the active header, chat entries, and child agent detail", () => {
+	test("applies expansion state to the active header and chat entries", () => {
 		const header = { setExpanded: vi.fn() };
 		const chatChild = { setExpanded: vi.fn() };
-		const childAgentDetail = { setToolsExpanded: vi.fn() };
 		const fakeThis: any = {
 			toolOutputExpanded: false,
 			customHeader: undefined,
 			builtInHeader: header,
 			chatContainer: { children: [chatChild] },
-			childAgentDetail,
 			ui: {
 				requestRender: vi.fn(),
 				requestRenderPreservingViewport: vi.fn(),
@@ -3031,7 +4211,6 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(fakeThis.toolOutputExpanded).toBe(true);
 		expect(header.setExpanded).toHaveBeenCalledWith(true);
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
-		expect(childAgentDetail.setToolsExpanded).toHaveBeenCalledWith(true);
 		// Expansion keeps the user anchored, so it uses the viewport-preserving path.
 		expect(fakeThis.ui.requestRenderPreservingViewport).toHaveBeenCalledTimes(1);
 	});

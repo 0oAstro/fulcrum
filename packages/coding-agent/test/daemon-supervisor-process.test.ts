@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -286,6 +286,119 @@ async function startBlockingBash(client: DaemonClient, activeSessionId: string, 
 }
 
 describe("daemon supervisor resident workers", () => {
+	it("lists, creates, and attaches passive children through their owning worker", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(tmpdir(), `prime-supervisor-passive-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+
+		const parentManager = SessionManager.create(projectDir, sessionDir);
+		parentManager.appendMessage({ role: "user", content: "parent fixture", timestamp: 1 });
+		parentManager.flushNow();
+		const parentSessionFile = parentManager.getSessionFile();
+		const parentArtifactDir = parentManager.getSessionArtifactDir();
+		if (!parentSessionFile || !parentArtifactDir) throw new Error("Missing parent fixture paths");
+
+		const makeChild = (childId: string, sessionName: string, timestamp: number) => {
+			const childSessionDir = join(parentArtifactDir, childId);
+			const manager = SessionManager.create(projectDir, childSessionDir);
+			manager.newSession({ parentSession: parentSessionFile });
+			manager.appendSessionInfo(sessionName);
+			manager.appendMessage({ role: "user", content: `completed ${childId} fixture`, timestamp });
+			manager.flushNow();
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Missing child fixture path");
+			return { childId, sessionName, childSessionDir, manager, sessionFile };
+		};
+		const child = makeChild("passive-child", "passive-child-worker", 2);
+		const createChild = makeChild("passive-create-child", "passive-create-worker", 3);
+		writeFileSync(
+			join(parentArtifactDir, "rlm-subagents.jsonl"),
+			`${[child, createChild]
+				.map((fixture) =>
+					JSON.stringify({
+						type: "rlm_subagent",
+						childId: fixture.childId,
+						sessionName: fixture.sessionName,
+						sessionDir: fixture.childSessionDir,
+						sessionFile: fixture.sessionFile,
+						parentSessionId: parentManager.getSessionId(),
+						parentSessionFile,
+						rlmDepth: 1,
+						rlmMaxDepth: 4,
+						rlmParentNodeId: fixture.childId,
+						status: "completed",
+						createdAt: 1,
+						updatedAt: "2026-01-01T00:00:00.000Z",
+					}),
+				)
+				.join("\n")}
+`,
+		);
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			sessionPath: parentSessionFile,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		expect(created.success).toBe(true);
+		const parentSummary = requireSummary(created.success ? created.data : undefined);
+		if (!parentSummary.workerPid) throw new Error("Parent worker did not expose its pid");
+		workerPids.add(parentSummary.workerPid);
+
+		const beforeAttach = await client.request({ type: "list" });
+		expect(beforeAttach.success).toBe(true);
+		const passiveSummary = requireSessionList(beforeAttach.success ? beforeAttach.data : undefined).find(
+			(summary) => summary.sessionFile === child.sessionFile,
+		);
+		expect(passiveSummary).toMatchObject({
+			sessionId: child.manager.getSessionId(),
+			sessionName: "passive-child-worker",
+			runtimeKind: "subagent",
+			rlmChildId: child.childId,
+			workerPid: parentSummary.workerPid,
+		});
+		expect(passiveSummary?.activeSessionId).toBeUndefined();
+
+		const createdChild = await client.request({
+			type: "create",
+			sessionPath: createChild.sessionFile,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!createdChild.success) throw new Error(createdChild.error);
+		expect(requireSummary(createdChild.data)).toMatchObject({
+			workerPid: parentSummary.workerPid,
+			rlmChildId: createChild.childId,
+		});
+		expect(countWorkerDescriptors(agentDir)).toBe(1);
+
+		const attached = await client.request({
+			type: "attach",
+			activeSessionId: child.manager.getSessionId(),
+			capabilities: ["attach_snapshot", "event_sequence", "slim_attach"],
+		});
+		if (!attached.success) throw new Error(attached.error);
+
+		const afterAttach = await client.request({ type: "list" });
+		const hydratedSummary = requireSessionList(afterAttach.success ? afterAttach.data : undefined).find(
+			(summary) => summary.sessionFile === child.sessionFile,
+		);
+		expect(hydratedSummary).toMatchObject({
+			activeSessionId: expect.any(String),
+			workerPid: parentSummary.workerPid,
+			rlmChildId: child.childId,
+		});
+		expect(countWorkerDescriptors(agentDir)).toBe(1);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
 	it("keeps client-owned workers hidden and removes them without archiving", async () => {
 		const root = tempDir();
 		const agentDir = join(root, "agent");
@@ -432,6 +545,56 @@ describe("daemon supervisor resident workers", () => {
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 	}, 60_000);
+
+	it("delivers agent-origin messages between root siblings on separate workers", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-root-message-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const createRoot = async (name: string) => {
+			const response = await client.request({
+				type: "create",
+				name,
+				config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+			});
+			expect(response.success).toBe(true);
+			return requireSummary(response.success ? response.data : undefined);
+		};
+		const source = await createRoot("source-root");
+		const target = await createRoot("target-root");
+		expect(source.workerPid).not.toBe(target.workerPid);
+		await startBlockingBash(client, target.activeSessionId ?? target.id, join(root, "target-root-blocker.ready"));
+
+		const response = await client.request({
+			type: "send_message",
+			fromActiveSessionId: source.activeSessionId ?? source.id,
+			targetActiveSessionId: target.activeSessionId ?? target.id,
+			message: "hello sibling root",
+			agentOrigin: true,
+		});
+		expect(response.success, JSON.stringify(response)).toBe(true);
+		expect(response).toMatchObject({
+			success: true,
+			data: {
+				source: "agent_message",
+				target: { activeSessionId: target.activeSessionId ?? target.id },
+				message: "hello sibling root",
+				deliveryStatus: "queued",
+			},
+		});
+		const shutdown = await client.request({ type: "shutdown" }, 10_000);
+		expect(shutdown.success).toBe(true);
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 30_000);
 
 	it("cancels an archived session heartbeat without spawning a worker", { tags: ["process-stress"] }, async () => {
 		const root = tempDir();

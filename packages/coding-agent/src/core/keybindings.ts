@@ -19,12 +19,12 @@ export interface AppKeybindings {
 	"app.suspend": true;
 	"app.model.select": true;
 	"app.model.toggleScope": true;
+	"app.configuration.previousTab": true;
 	"app.tools.expand": true;
 	"app.thinking.toggle": true;
 	"app.subagents.focus": true;
 	"app.heartbeats.open": true;
 	"app.heartbeats.openSelected": true;
-	"app.session.toggleNamedFilter": true;
 	"app.editor.external": true;
 	"app.prompt.stash": true;
 	"app.message.followUp": true;
@@ -39,6 +39,7 @@ export interface AppKeybindings {
 	"app.agents.open": true;
 	"app.modal.back": true;
 	"app.agents.reply": true;
+	"app.agents.new": true;
 	"app.agents.delete": true;
 	"app.agents.program": true;
 	"app.agents.rename": true;
@@ -46,11 +47,6 @@ export interface AppKeybindings {
 	"app.tree.unfoldOrDown": true;
 	"app.tree.editLabel": true;
 	"app.tree.toggleLabelTimestamp": true;
-	"app.session.togglePath": true;
-	"app.session.toggleSort": true;
-	"app.session.rename": true;
-	"app.session.delete": true;
-	"app.session.deleteNoninvasive": true;
 	"app.models.save": true;
 	"app.models.enableAll": true;
 	"app.models.clearAll": true;
@@ -84,7 +80,8 @@ export const KEYBINDINGS = {
 		description: "Suspend to background",
 	},
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
-	"app.model.toggleScope": { defaultKeys: "shift+tab", description: "Toggle model selector scope" },
+	"app.model.toggleScope": { defaultKeys: "alt+s", description: "Toggle model selector scope" },
+	"app.configuration.previousTab": { defaultKeys: "shift+tab", description: "Select previous configuration tab" },
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
@@ -101,10 +98,6 @@ export const KEYBINDINGS = {
 	"app.heartbeats.openSelected": {
 		defaultKeys: "right",
 		description: "Open selected heartbeat",
-	},
-	"app.session.toggleNamedFilter": {
-		defaultKeys: "ctrl+n",
-		description: "Toggle named session filter",
 	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",
@@ -134,10 +127,11 @@ export const KEYBINDINGS = {
 	"app.session.tree": { defaultKeys: [], description: "Open session tree" },
 	"app.session.fork": { defaultKeys: [], description: "Fork current session" },
 	"app.session.resume": { defaultKeys: [], description: "Resume a session" },
-	"app.agents.back": { defaultKeys: "left", description: "Return to agents view" },
-	"app.agents.open": { defaultKeys: "right", description: "Open chat view for selected agent" },
+	"app.agents.back": { defaultKeys: "left", description: "Return to parent agent scope" },
+	"app.agents.open": { defaultKeys: "right", description: "Drill into selected agent" },
 	"app.modal.back": { defaultKeys: "left", description: "Go back / close the current dialog" },
 	"app.agents.reply": { defaultKeys: "space", description: "Reply to selected agent" },
+	"app.agents.new": { defaultKeys: "ctrl+n", description: "Start a new session from the agents view" },
 	"app.agents.delete": { defaultKeys: "ctrl+x", description: "Stop or delete selected agent" },
 	"app.agents.program": { defaultKeys: "ctrl+o", description: "Show the program that spawned subagents" },
 	"app.agents.rename": { defaultKeys: "ctrl+r", description: "Rename selected agent session" },
@@ -156,26 +150,6 @@ export const KEYBINDINGS = {
 	"app.tree.toggleLabelTimestamp": {
 		defaultKeys: "shift+t",
 		description: "Toggle tree label timestamps",
-	},
-	"app.session.togglePath": {
-		defaultKeys: "ctrl+p",
-		description: "Toggle session path display",
-	},
-	"app.session.toggleSort": {
-		defaultKeys: "ctrl+s",
-		description: "Toggle session sort mode",
-	},
-	"app.session.rename": {
-		defaultKeys: "ctrl+r",
-		description: "Rename session",
-	},
-	"app.session.delete": {
-		defaultKeys: "ctrl+d",
-		description: "Delete session",
-	},
-	"app.session.deleteNoninvasive": {
-		defaultKeys: "ctrl+backspace",
-		description: "Delete session when query is empty",
 	},
 	"app.models.save": {
 		defaultKeys: "ctrl+s",
@@ -272,7 +246,6 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	expandTools: "app.tools.expand",
 	toggleThinking: "app.thinking.toggle",
 	focusSubagents: "app.subagents.focus",
-	toggleSessionNamedFilter: "app.session.toggleNamedFilter",
 	externalEditor: "app.editor.external",
 	followUp: "app.message.followUp",
 	dequeue: "app.message.dequeue",
@@ -283,6 +256,7 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	resume: "app.session.resume",
 	agentsBack: "app.agents.back",
 	agentsReply: "app.agents.reply",
+	agentsNew: "app.agents.new",
 	agentsDelete: "app.agents.delete",
 	agentsProgram: "app.agents.program",
 	agentsRename: "app.agents.rename",
@@ -290,11 +264,6 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	treeUnfoldOrDown: "app.tree.unfoldOrDown",
 	treeEditLabel: "app.tree.editLabel",
 	treeToggleLabelTimestamp: "app.tree.toggleLabelTimestamp",
-	toggleSessionPath: "app.session.togglePath",
-	toggleSessionSort: "app.session.toggleSort",
-	renameSession: "app.session.rename",
-	deleteSession: "app.session.delete",
-	deleteSessionNoninvasive: "app.session.deleteNoninvasive",
 } as const satisfies Record<string, Keybinding>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {

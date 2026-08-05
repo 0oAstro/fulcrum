@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-05
+
+## [0.6.1] - 2026-08-05
+
+## [0.6.0] - 2026-08-04
+
+### Removed
+
+- Removed the groq `qwen/qwen3-32b` reasoning-effort special case and its test; groq delisted the model, which broke CI catalog regeneration.
+
+## [0.5.1] - 2026-08-04
+
+## [0.5.0] - 2026-08-03
+
+## [0.4.0] - 2026-08-01
+
+### Changed
+
+- Updated the model catalog snapshot with Claude Opus 5 across supported providers, Gemini 3.5/3.6 Flash models, Kimi K3 variants, and the current 103-model Prime Inference catalog; removed the discontinued `gpt-5-chat`, `gpt-5-codex`, and `laguna-m.1` routes.
+- Corrected generated catalog metadata for Opus 5 adaptive thinking, Copilot Claude routing, gateway reasoning tags, Kimi K3 variants, and unsupported Google and batch routes; excluded Gemini Live, Deep Research, and Computer Use models.
+
 ## [0.3.3] - 2026-07-23
 
 - Fixed Vertex Gemini 2.5 Flash-Lite minimal reasoning requests to use the supported 512-token thinking budget.

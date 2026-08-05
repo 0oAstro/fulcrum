@@ -105,20 +105,26 @@ Normal interactive sessions are persistent agents backed by isolated worker proc
 Within a session, the model can delegate through the `rlm` callable already available in IPython:
 
 ```python
-# Return one child result immediately.
-review = await rlm("Review the authentication flow for security issues.", name="auth-reviewer")
-print(review.answer)
-
-# Run independent children in parallel.
-tests, docs = await asyncio.gather(
-    rlm("Find missing regression tests."),
-    rlm("Find stale public documentation."),
+# Spawn independent children. Each call returns at admission with a child handle,
+# never the child's answer.
+review = await rlm(
+    "Review authentication and reply to the parent with findings.",
+    name="auth-reviewer",
 )
+tests = await rlm("Find missing regression tests and reply to the parent.", name="test-reviewer")
+docs = await rlm("Find stale public documentation and reply to the parent.", name="docs-reviewer")
 
-# Start background work and collect it later.
-task = asyncio.create_task(rlm("Run focused checks and report failures.", name="checks"))
+# Children reply from their own sessions with:
+# await agent_message.send(message, receiver_role="parent")
+# Their replies arrive here as ordinary agent messages.
+
+# Recover handles and follow up with a retained child.
 children = await rlm.list_subagents()
-result = await task
+await agent_message.send(
+    "Also check authorization boundaries.",
+    receiver_role="child",
+    receiver_name=review.name,
+)
 ```
 
 Children inherit the parent model unless the user requests another model. They run as TypeScript `AgentSession` instances under the same root worker and can use the same provider, tools, skills, session storage, and scheduling system. See [RLM Runtime Architecture](rlm-runtime.md).
@@ -249,18 +255,44 @@ prime-agent --no-extensions -e ./my-extension.ts
 
 ### Autonomous Options
 
-| Option | Description |
-|--------|-------------|
-| `--autonomous` | Continue until host-observable terminal evidence exists |
-| `--autonomous-gate <command>` | Run a command before autonomous mode may finish; repeatable |
-| `--autonomous-gate-retries <n>` | Maximum retries for each failed gate; default is 3 |
-| `--autonomous-gate-timeout-ms <n>` | Timeout for each gate command |
-| `--autonomous-max-continuations <n>` | Maximum autonomous follow-up messages; default is 3 |
-| `--autonomous-max-turns <n>` | Maximum assistant turns; default is 12 |
-| `--autonomous-max-tokens <n>` | Maximum tokens; default is 80000 |
-| `--autonomous-timeout-ms <n>` | Maximum wall-clock duration; default is 1800000 milliseconds |
-| `--goal <objective>` | Start the session with an active persistent goal; only seeds new top-level sessions (rlmDepth 0) with no existing goal state |
-| `--goal-token-budget <n>` | Positive integer token budget for the initial goal; requires `--goal` |
+Autonomous mode is a host policy for unattended work. It starts disabled. `--autonomous` enables it, and supplying any `--autonomous-*` sub-option also enables it. The host starts each enabled run with fresh continuation, turn, token, and elapsed-time counters.
+
+| Option | Behavior, units, and default |
+|--------|------------------------------|
+| `--autonomous` | Enable autonomous continuations. With no gates, the host keeps requesting work until a limit prevents another continuation. |
+| `--autonomous-gate <command>` | Add a shell command that must pass before the run can finish. Repeatable commands run in CLI order; the default is no gates. |
+| `--autonomous-gate-retries <n>` | Set the per-gate retry limit. Default: `3`. A failed gate can continue while its recorded attempt is at most this value; the next failed attempt exhausts the gate. |
+| `--autonomous-gate-timeout-ms <n>` | Set the timeout for each gate process in milliseconds. Default: `300000` (5 minutes). A timed-out gate is failed and its process tree is stopped. |
+| `--autonomous-max-continuations <n>` | Set the maximum host-injected follow-up messages. Default: `3`. |
+| `--autonomous-max-turns <n>` | Set the maximum assistant responses counted while autonomous mode is enabled. Default: `12`. |
+| `--autonomous-max-tokens <n>` | Set the maximum accumulated tokens. Default: `80000`; accounting includes input, output, and cache-write tokens, but excludes cache-read tokens. |
+| `--autonomous-timeout-ms <n>` | Set the maximum elapsed autonomous time in milliseconds. Default: `1800000` (30 minutes). |
+
+All `<n>` values must be positive integers: zero, negative, fractional, and non-numeric values are rejected. Value-taking autonomous flags require a separate argument, not `--flag=value`. A missing value is rejected, and a following long option is not consumed as a value. Repeating a numeric flag uses its last value; repeating `--autonomous-gate` appends another gate.
+
+After each assistant response, configured gates run before the ordinary continuation limits are evaluated. All gates must pass for the run to finish. A failed gate supplies bounded command output to the next continuation so the agent can repair it; Prime Agent avoids rerunning an unchanged failed gate and advances its attempt count instead. A passing gate permits completion even if a continuation, turn, token, or time limit has otherwise been reached. If a gate does not pass, or if there are no gates, the host can inject another continuation only while all four limits remain below their configured values. Limits are checked in this order: continuations, turns, tokens, then elapsed time. Reaching one prevents another automatic continuation; it does not imply task success.
+
+For example, this noninteractive run uses a locally available model configuration, skips startup network operations, and bounds every autonomous budget while requiring the project check to pass:
+
+```bash
+prime-agent -p \
+  --autonomous \
+  --autonomous-gate "npm run check" \
+  --autonomous-gate-retries 2 \
+  --autonomous-gate-timeout-ms 300000 \
+  --autonomous-max-continuations 3 \
+  --autonomous-max-turns 12 \
+  --autonomous-max-tokens 80000 \
+  --autonomous-timeout-ms 1800000 \
+  --model openai/gpt-5.1-codex \
+  --offline \
+  --thinking high \
+  "Fix the failing check and report the verified result."
+```
+
+`--offline` disables startup network operations; it does not supply model credentials or make provider inference offline. Choose a model already configured for the local environment.
+
+Goals are separate from autonomous mode: `--goal <objective>` starts a persistent goal only for a new root session with no existing goal state, while autonomous mode decides whether the host should inject another continuation. `--goal-token-budget <n>` is a positive-integer token budget for that initial goal and requires `--goal`.
 
 ### Other Options
 

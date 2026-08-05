@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-05
+
+## [0.6.1] - 2026-08-05
+
+## [0.6.0] - 2026-08-04
+
+## [0.5.1] - 2026-08-04
+
+## [0.5.0] - 2026-08-03
+
+## [0.4.0] - 2026-08-01
+
+### Added
+
+- Added the synchronous `shouldStopBeforeTurn` agent-loop hook, allowing hosts to end after a completed turn without starting another provider call.
+
 ## [0.3.3] - 2026-07-23
 
 - Fixed recovery event listener failures replacing the original agent lifecycle failure.

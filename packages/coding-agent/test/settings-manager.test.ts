@@ -316,6 +316,51 @@ describe("SettingsManager", () => {
 			expect(errors.map((e) => e.scope).sort()).toEqual(["global", "project"]);
 			expect(manager.drainErrors()).toEqual([]);
 		});
+
+		it("should report a new global error when saving after the load error was drained", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			const invalidSettings = "{ invalid global json";
+			writeFileSync(settingsPath, invalidSettings);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.drainErrors()).toHaveLength(1);
+
+			manager.setRlmMaxDepth(3);
+			await manager.flush();
+
+			const errors = manager.drainErrors();
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.scope).toBe("global");
+			expect(errors[0]?.error.message).toContain("Global settings not saved: settings file failed to parse:");
+			expect(readFileSync(settingsPath, "utf-8")).toBe(invalidSettings);
+		});
+
+		it("should report a new project error when saving after the load error was drained", async () => {
+			const settingsPath = join(projectDir, ".prime", "agent", "settings.json");
+			const invalidSettings = "{ invalid project json";
+			writeFileSync(settingsPath, invalidSettings);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.drainErrors()).toHaveLength(1);
+
+			manager.setProjectPackages(["npm:test-pkg"]);
+			await manager.flush();
+
+			const errors = manager.drainErrors();
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.scope).toBe("project");
+			expect(errors[0]?.error.message).toContain("Project settings not saved: settings file failed to parse:");
+			expect(readFileSync(settingsPath, "utf-8")).toBe(invalidSettings);
+		});
+
+		it("drains only the requested scope", () => {
+			writeFileSync(join(agentDir, "settings.json"), "{ invalid global json");
+			writeFileSync(join(projectDir, ".prime", "agent", "settings.json"), "{ invalid project json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.drainErrors("global").map((entry) => entry.scope)).toEqual(["global"]);
+			expect(manager.drainErrors().map((entry) => entry.scope)).toEqual(["project"]);
+		});
 	});
 
 	describe("project settings directory creation", () => {
@@ -455,6 +500,30 @@ describe("SettingsManager", () => {
 			expect(servers?.acme).toEqual({ type: "http", url: "https://global.acme/mcp", oauth: true });
 			// Project override replaces the shared entry.
 			expect(servers?.shared).toEqual({ type: "http", url: "https://project.shared/mcp" });
+		});
+	});
+	describe("idle worker eviction", () => {
+		it("defaults to 90 minutes and treats none as off", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getIdleEvictionMinutes()).toBe(90);
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ idleEvictionMinutes: "none" }));
+			const disabled = SettingsManager.create(projectDir, agentDir);
+			expect(disabled.getIdleEvictionMinutes()).toBe("off");
+		});
+
+		it("reads and writes the global daemon policy without project overrides", async () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ idleEvictionMinutes: 60 }));
+			writeFileSync(
+				join(projectDir, ".prime", "agent", "settings.json"),
+				JSON.stringify({ idleEvictionMinutes: 30 }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getIdleEvictionMinutes()).toBe(60);
+
+			manager.setIdleEvictionMinutes("off");
+			await manager.flush();
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).idleEvictionMinutes).toBe("off");
 		});
 	});
 });

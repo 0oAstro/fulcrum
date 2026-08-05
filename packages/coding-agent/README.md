@@ -43,13 +43,13 @@ Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mon
 ## Quick Start
 
 ```bash
-curl -fsSL https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/install.sh | sh
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
 To install the beta built from the latest commit on `main`:
 
 ```bash
-curl -fsSL https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/install-beta.sh | sh
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh -s -- beta
 ```
 
 Authenticate with an API key:
@@ -150,7 +150,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/effort` | Set reasoning/thinking level |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
-| `/resume` | Pick from previous sessions |
+| `/resume` | Open the searchable session view |
 | `/new`, `/clear` | Start a new session |
 | `/name <name>` | Set session display name |
 | `/session` | Show session info (file, ID, messages) |
@@ -206,7 +206,7 @@ Sessions are stored as JSONL files with a tree structure. Each entry has an `id`
 
 ### Management
 
-Sessions auto-save as flat JSONL files under `~/.prime/agent/sessions/`. Each session header records its working directory, which the session picker uses for project-scoped views.
+Sessions auto-save as flat JSONL files under `~/.prime/agent/sessions/`. Each session header records its working directory, which the searchable session view uses to identify and open saved sessions.
 
 ```bash
 prime-agent -c                  # Continue most recent session
@@ -495,7 +495,7 @@ Run `prime-agent help` for the command list and `prime-agent help <command>` for
 ### Agent Commands
 
 ```bash
-prime-agent agents                         # Open the agents view
+prime-agent agents                         # Search running, idle, and inactive sessions
 prime-agent list [--all]                   # List active or saved agents
 prime-agent attach <agent>                 # Attach the interactive UI
 prime-agent stop <agent>                   # Stop one agent
@@ -563,7 +563,7 @@ Use `prime-agent model list [search]` to list available models.
 | Option | Description |
 |--------|-------------|
 | `-c`, `--continue` | Continue most recent session |
-| `-r`, `--resume [path\|id]` | Browse and select session, or resume a specific session file or partial UUID |
+| `-r`, `--resume [path\|id]` | Open the searchable session view, or resume a specific session file or partial UUID |
 | `--fork <path\|id>` | Fork specific session file or partial UUID into a new session |
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode (don't save) |
@@ -595,6 +595,23 @@ Available built-in tools: `ipython`
 | `--no-context-files`, `-nc` | Disable AGENTS.md and CLAUDE.md context file discovery |
 
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings.json (e.g., `--no-extensions -e ./my-ext.ts`).
+
+### Autonomous Options
+
+Autonomous mode is disabled by default. `--autonomous` or any of its sub-options enables host-managed continuations for unattended work.
+
+| Option | Description |
+|--------|-------------|
+| `--autonomous` | Continue until gates pass or a limit prevents another continuation |
+| `--autonomous-gate <command>` | Add a repeatable shell command that must pass before completion |
+| `--autonomous-gate-retries <n>` | Positive per-gate retry limit; default `3` |
+| `--autonomous-gate-timeout-ms <n>` | Positive per-gate timeout in milliseconds; default `300000` |
+| `--autonomous-max-continuations <n>` | Positive host follow-up limit; default `3` |
+| `--autonomous-max-turns <n>` | Positive assistant-turn limit; default `12` |
+| `--autonomous-max-tokens <n>` | Positive token limit; default `80000` |
+| `--autonomous-timeout-ms <n>` | Positive wall-clock limit in milliseconds; default `1800000` |
+
+Gates run before the continuation, turn, token, and wall-clock limits are evaluated; every configured gate must pass for autonomous completion. See the [usage guide](docs/usage.md#autonomous-options) for validation rules, retry behavior, and detailed limit interactions.
 
 ### Other Options
 

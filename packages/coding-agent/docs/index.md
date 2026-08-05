@@ -7,7 +7,7 @@ Prime Agent is an RLM-native coding and research harness built around a persiste
 Install the latest stable release on Linux or macOS:
 
 ```bash
-curl -fsSL https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/install.sh | sh
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
 Then run it in a project directory:
@@ -48,6 +48,7 @@ Public releases are currently installed from versioned release artifacts. The in
 ## Programmatic Usage
 
 - [SDK](sdk.md) - embed Prime Agent in Node.js applications.
+- [ACP mode](acp.md) - drive Prime Agent from any Agent Client Protocol client.
 - [RPC mode](rpc.md) - integrate over stdin/stdout JSONL.
 - [JSON event stream mode](json.md) - print mode with structured events.
 - [TUI components](tui.md) - build custom terminal UI for extensions.

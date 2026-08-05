@@ -81,7 +81,7 @@ describe("createAgentSessionFromServices", () => {
 						runtimeKind: "top-level",
 						cwd: tempDir,
 						isStreaming: false,
-						pendingMessageCount: 0,
+						unfinishedActionCount: 0,
 					},
 				],
 			}),
@@ -98,10 +98,9 @@ describe("createAgentSessionFromServices", () => {
 		});
 
 		try {
-			expect(session.handleAgentMessageHostRequest("agent_message.list")).toMatchObject({
-				current: { activeSessionId: "current" },
-				agents: [{ activeSessionId: "worker" }],
-			});
+			expect(() => session.handleAgentMessageHostRequest("agent_message.list")).toThrow(
+				"unknown agent message request",
+			);
 			expect(
 				(
 					session as unknown as {
@@ -173,7 +172,8 @@ describe("createAgentSessionFromServices", () => {
 					isCompacting: false,
 					attachedClients: 1,
 					messageCount: 0,
-					pendingMessageCount: 0,
+					queuedCount: 0,
+					isSessionActive: false,
 				},
 				agents: [],
 			}),

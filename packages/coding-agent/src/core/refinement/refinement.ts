@@ -135,7 +135,7 @@ Continual harness components:
 - prompt: supplemental prompt notes only. The base system prompt is immutable and MUST NOT be rewritten.
 - memory: durable facts, decisions, failures, preferences, and outcomes.
 - skill: installed Python REPL skill. Skill create/update edits MUST include a \`reference\` object with \`{"type":"python"}\`, a Python import, and a callable or call pattern; they also MUST include an \`arguments\` object describing accepted inputs, required fields, defaults, and constraints. Use \`{}\` for \`arguments\` only when the Python callable truly needs no external inputs. Include the RLM-native call form \`await <skill_import>(...)\`.
-- subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: create a concise task prompt, start \`asyncio.create_task(rlm("sub-task"))\` by default, keep the task handle, and await only when the result is needed; for independent parallel subagents use \`await asyncio.gather(rlm("task1"), rlm("task2"))\`. Use direct \`await rlm("sub-task")\` only when the result is immediately required. Do not invent wrappers like \`run_subagent(...)\`.
+- subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with \`handle = await rlm("sub-task")\`; admission returns immediately with \`rlm_child_id\`, \`name\`, \`session_dir\`, and \`model\`, never the child's answer. Results arrive only through explicit \`agent_message\` replies or files; children reply with \`await agent_message.send(message, receiver_role="parent")\`. Use \`await rlm.list_subagents()\` to recover direct child handles and \`await agent_message.send(..., receiver_role="child", receiver_name=handle.name)\` for follow-ups. Do not invent wrappers like \`run_subagent(...)\`.
 
 Scope and persistence policy:
 - The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
@@ -183,6 +183,26 @@ Return JSON only:
   "rationale": "short reason",
   "instructions": "optional concise instructions for /refine if shouldRefine is true"
 }`;
+
+/**
+ * Output budgets are derived from the selected model instead of fixed literals.
+ * /refine input scales with harness size (entry overview, refinement history, and
+ * the trajectory slice), so a constant output cap silently truncates exactly the
+ * large multi-edit proposals that matter most. Math.min keeps small models honest.
+ */
+const REFINEMENT_MAX_OUTPUT_TOKENS = 32_000;
+const AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS = 4_096;
+
+const TRUNCATED_JSON_ERROR =
+	"the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.";
+
+function refinementMaxOutputTokens(model: Model<any>): number {
+	return Math.min(model.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS);
+}
+
+function autoRefineReviewMaxOutputTokens(model: Model<any>): number {
+	return Math.min(model.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS);
+}
 
 function now(): string {
 	return new Date().toISOString();
@@ -435,7 +455,7 @@ export function formatHarnessStateForPrompt(
 			: "When to refine the continual harness: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep continual harness edits small and evidence-backed.",
 		"",
 		includeIpythonExamples
-			? "Call contract: read each installed Python skill's SKILL.md and call its documented module function in IPython; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Continual harness subagent entries are invoked by composing a concise task prompt and starting `asyncio.create_task(rlm('sub-task'))` by default, then awaiting only when the result is needed; use `await asyncio.gather(rlm('task1'), rlm('task2'))` for independent parallel subagents. Use direct `await rlm('sub-task')` only when the result is immediately required. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries."
+			? "Call contract: read each installed Python skill's SKILL.md and call its documented module function in IPython; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm('sub-task')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries."
 			: options.includeShellExamples
 				? "Call contract: use installed skills as shell commands when available (for example `<skill_import> ...`). Continual harness entries are routing/context hints only in sessions without IPython; do not use Python `await`, `asyncio`, or `rlm` examples unless the prompt also documents an IPython kernel."
 				: "Call contract: continual harness entries are routing/context hints only in sessions without IPython or shell access; do not use Python `await`, `asyncio`, `rlm`, or shell skill commands unless the prompt also documents those interfaces.",
@@ -453,7 +473,7 @@ export function formatHarnessStateForPrompt(
 		// IPython sessions, include the native `rlm` invocation hint.
 		if (kind === "subagent" && entries.length > 0 && includeIpythonExamples) {
 			lines.push(
-				`${kind}: ${entries.length} (invoke a spec by turning it into a concise task prompt and starting \`asyncio.create_task(rlm('<task>'))\` by default)`,
+				`${kind}: ${entries.length} (invoke a spec by turning it into a concise task prompt and spawning with \`await rlm('<task>')\`; admission returns a child handle, never the answer)`,
 			);
 		} else {
 			lines.push(`${kind}: ${entries.length}`);
@@ -541,19 +561,71 @@ function historyForPrompt(history: RefinementResult[]): string {
 		.join("\n\n");
 }
 
+/**
+ * Whether a JSON candidate ends mid-value: an unterminated string, or unclosed
+ * objects/arrays. A reply cut off by an exhausted output budget is incomplete in
+ * this sense, while a complete-but-malformed reply is balanced. Brace slicing can
+ * also produce a balanced fragment, so callers treat "balanced" as malformed.
+ */
+function isIncompleteJson(candidate: string): boolean {
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	for (const char of candidate) {
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (inString) {
+			if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') inString = true;
+		else if (char === "{" || char === "[") depth++;
+		else if (char === "}" || char === "]") depth--;
+	}
+	return inString || depth > 0;
+}
+
+function parseJsonCandidate(candidate: string): unknown {
+	try {
+		return JSON.parse(candidate);
+	} catch (error) {
+		// A truncated reply and a malformed one both fail here, and JSON.parse
+		// describes the fragment rather than the cause. Name the cause instead.
+		if (isIncompleteJson(candidate)) {
+			throw new Error(TRUNCATED_JSON_ERROR);
+		}
+		throw new Error(`the model did not return valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
 function extractJsonObject(text: string): unknown {
 	const trimmed = text.trim();
 	if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-		return JSON.parse(trimmed);
+		// A reply truncated after a nested closing brace still looks well-formed
+		// here, so this path needs the same diagnosis as the slicing fallback.
+		return parseJsonCandidate(trimmed);
 	}
 	const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
 	if (fenced) {
-		return JSON.parse(fenced[1].trim());
+		return parseJsonCandidate(fenced[1].trim());
 	}
+	// Brace slicing recovers JSON wrapped in prose. On a reply truncated inside the
+	// edits array it slices to an earlier edit's closing brace, so a failure here
+	// is diagnosed against the original text rather than the balanced fragment.
 	const start = trimmed.indexOf("{");
 	const end = trimmed.lastIndexOf("}");
 	if (start !== -1 && end > start) {
-		return JSON.parse(trimmed.slice(start, end + 1));
+		try {
+			return JSON.parse(trimmed.slice(start, end + 1));
+		} catch {
+			return parseJsonCandidate(trimmed.slice(start));
+		}
+	}
+	if (isIncompleteJson(trimmed)) {
+		throw new Error(TRUNCATED_JSON_ERROR);
 	}
 	throw new Error("Refiner did not return a JSON object");
 }
@@ -844,11 +916,14 @@ export async function planRefinement(
 			systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
-		{ maxTokens: 4096, signal, apiKey, headers },
+		{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
 	);
 
 	if (response.stopReason === "error") {
 		throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
+	}
+	if (response.stopReason === "length") {
+		throw new Error(`Refinement failed: ${TRUNCATED_JSON_ERROR}`);
 	}
 
 	const text = response.content
@@ -907,10 +982,13 @@ ${conversationText}
 			systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
-		{ maxTokens: 1024, signal, apiKey, headers },
+		{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);
+	}
+	if (response.stopReason === "length") {
+		throw new Error(`Auto-refine review failed: ${TRUNCATED_JSON_ERROR}`);
 	}
 	const text = response.content
 		.filter((content): content is { type: "text"; text: string } => content.type === "text")

@@ -1,11 +1,7 @@
 import { resolve } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
-import type {
-	AgentSessionMessageDeliveryMode,
-	AgentSessionMessageReceipt,
-	AgentSessionMessageSafetyStatus,
-} from "../../core/agent-messages.js";
+import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
@@ -176,14 +172,13 @@ export class InProcessAgentConnection implements AgentConnection {
 		scope: AgentConnectionSavedSessionScope,
 		callbacks?: AgentConnectionSessionListCallbacks,
 	): Promise<AgentConnectionSavedSessionInfo[]> {
+		// In-memory managers hold "" for "no explicit session dir"; pass undefined so
+		// list()/listAll() fall back to the default directories instead of scanning "".
+		const sessionDir = this.session.sessionManager.getSessionDir() || undefined;
 		if (scope === "current") {
-			return SessionManager.list(
-				this.session.sessionManager.getCwd(),
-				this.session.sessionManager.getSessionDir(),
-				callbacks,
-			);
+			return SessionManager.list(this.session.sessionManager.getCwd(), sessionDir, callbacks);
 		}
-		return SessionManager.listAll(callbacks, this.session.sessionManager.getSessionDir());
+		return SessionManager.listAll(callbacks, sessionDir);
 	}
 
 	async getQueue(): Promise<AgentConnectionQueueState> {
@@ -243,11 +238,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		throw new Error("Heartbeats require daemon mode");
 	}
 
-	async sendAgentMessage(
-		_targetActiveSessionId: string,
-		_message: string,
-		_deliveryMode?: AgentSessionMessageDeliveryMode,
-	): Promise<AgentSessionMessageReceipt> {
+	async sendAgentMessage(_targetActiveSessionId: string, _message: string): Promise<AgentSessionMessageReceipt> {
 		throw new Error("Agent messaging requires daemon mode");
 	}
 
@@ -294,37 +285,46 @@ export class InProcessAgentConnection implements AgentConnection {
 	async prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void> {
 		await new Promise<void>((resolve, reject) => {
 			let settled = false;
+			let accepted = false;
 			const resolveOnce = () => {
-				if (settled) return;
-				settled = true;
-				resolve();
+				if (!settled) {
+					settled = true;
+					resolve();
+				}
 			};
 			const rejectOnce = (error: unknown) => {
-				if (settled) return;
-				settled = true;
-				reject(error);
+				if (!settled) {
+					settled = true;
+					reject(error);
+				}
 			};
 			const prompt = this.session.prompt(message, {
-				images: options?.images,
-				streamingBehavior: options?.streamingBehavior,
-				source: options?.source,
+				...(options?.images ? { images: options.images } : {}),
+				...(options?.streamingBehavior ? { streamingBehavior: options.streamingBehavior, resumeIfIdle: true } : {}),
+				...(options?.queueIfBusy !== undefined ? { queueIfBusy: options.queueIfBusy } : {}),
+				...(options?.source ? { source: options.source } : {}),
+				...(options?.signal ? { signal: options.signal } : {}),
 				preflightResult: (success) => {
-					if (success) resolveOnce();
+					if (success) {
+						accepted = true;
+						resolveOnce();
+					}
 				},
 			});
-			void prompt.then(resolveOnce, rejectOnce);
+			void prompt.then(() => {
+				if (accepted) resolveOnce();
+				else rejectOnce(new Error("Prompt was not accepted by the session."));
+			}, rejectOnce);
 		});
 	}
 
 	async promptAndWait(message: string, options?: AgentConnectionPromptOptions): Promise<void> {
-		if (!options) {
-			await this.session.prompt(message);
-			return;
-		}
-		await this.session.prompt(message, {
-			images: options.images,
-			streamingBehavior: options.streamingBehavior,
-			source: options.source,
+		await this.session.promptAndWait(message, {
+			...(options?.images ? { images: options.images } : {}),
+			...(options?.streamingBehavior ? { streamingBehavior: options.streamingBehavior, resumeIfIdle: true } : {}),
+			...(options?.queueIfBusy !== undefined ? { queueIfBusy: options.queueIfBusy } : {}),
+			...(options?.source ? { source: options.source } : {}),
+			...(options?.signal ? { signal: options.signal } : {}),
 		});
 	}
 
@@ -376,7 +376,7 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async waitForIdle(): Promise<void> {
-		await this.session.agent.waitForIdle();
+		await this.session.waitForIdle();
 	}
 
 	async waitForHeadlessCompletion(): Promise<AgentAutonomousStatus> {
@@ -521,6 +521,14 @@ export class InProcessAgentConnection implements AgentConnection {
 		this.session.setSessionName(trimmedName);
 	}
 
+	async getRlmMaxDepthStatus() {
+		return this.session.getRlmMaxDepthStatus();
+	}
+
+	async setRlmMaxDepth(maxDepth: number, options?: { global?: boolean }) {
+		return this.session.setRlmMaxDepth(maxDepth, options);
+	}
+
 	async renameSavedSession(sessionPath: string, name: string): Promise<void> {
 		const trimmedName = name.trim();
 		if (!trimmedName) {
@@ -546,6 +554,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		const unsubscribes = new Set<() => void>();
 		return {
 			getMessages: async () => child.messages,
+			getCommands: async () => createAgentConnectionCommands(child),
 			subscribe: (listener) => {
 				const unsubscribe = child.subscribe((event) => void listener({ type: "session_event", event }));
 				unsubscribes.add(unsubscribe);
@@ -591,7 +600,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		await session.bindExtensions({
 			uiContext: this.headlessExtensionOptions?.uiContext,
 			commandContextActions: {
-				waitForIdle: () => session.agent.waitForIdle(),
+				waitForIdle: () => session.waitForIdle(),
 				newSession: (options) => this.runtimeHost.newSession(options),
 				fork: async (entryId, options) => {
 					const result = await this.runtimeHost.fork(entryId, options);
