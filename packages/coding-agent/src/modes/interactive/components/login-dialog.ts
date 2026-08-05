@@ -16,7 +16,7 @@ import { execFile } from "child_process";
 import { PRIME_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
 import { copyToClipboard } from "../../../utils/clipboard.js";
 import { theme } from "../theme/theme.js";
-import { keyHint } from "./keybinding-hints.js";
+import { formatKeyText, keyHint } from "./keybinding-hints.js";
 import { MenuPanel, MenuSearchInput } from "./menu-panel.js";
 import { shouldTreatAsBack } from "./modal-back.js";
 
@@ -30,6 +30,16 @@ function centeredLine(text: string, width: number): string {
 	const padding = Math.max(0, safeWidth - visibleWidth(content));
 	const left = Math.floor(padding / 2);
 	return " ".repeat(left) + content + " ".repeat(padding - left);
+}
+
+function isTextEntryKeybinding(key: string): boolean {
+	const parts = key.toLowerCase().split("+");
+	const keyPart = parts.at(-1);
+	return !parts.includes("ctrl") && !parts.includes("alt") && (keyPart === "space" || keyPart?.length === 1);
+}
+
+function isPrintableInput(data: string): boolean {
+	return data.length === 1 && data >= " " && data !== "\x7f";
 }
 
 class PrimeLoginHeader implements Component {
@@ -186,6 +196,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.addMutedText(prompt);
 		this.contentContainer.addChild(this.input);
 		this.inputVisible = true;
+		this.authActions?.setText(this.getAuthActionsText());
 		this.contentContainer.addChild(new Text(theme.fg("muted", keyHint("tui.select.cancel", "cancel")), 0, 0));
 		this.tui.requestRender();
 
@@ -214,6 +225,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		}
 		this.contentContainer.addChild(this.input);
 		this.inputVisible = true;
+		this.authActions?.setText(this.getAuthActionsText());
 		this.contentContainer.addChild(
 			new Text(
 				theme.fg("muted", `${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`),
@@ -332,17 +344,22 @@ export class LoginDialogComponent extends Container implements Focusable {
 	}
 
 	private getAuthActionsText(status?: "copied" | "failed"): string {
+		const configuredCopyKeys = getKeybindings().getKeys("app.clipboard.copyLoginUrl");
+		const copyKeys = this.inputVisible
+			? configuredCopyKeys.filter((key) => !isTextEntryKeybinding(key))
+			: configuredCopyKeys.slice(0, 1);
+		const copyHint =
+			copyKeys.length > 0
+				? theme.fg("dim", formatKeyText(copyKeys.join("/"))) +
+					theme.fg("muted", ` ${status === "failed" ? "retry" : "copy"}`)
+				: undefined;
 		const statusText =
 			status === "copied"
 				? theme.fg("success", "Copied sign-in link")
 				: status === "failed"
 					? theme.fg("error", "Failed to copy sign-in link")
 					: undefined;
-		return [
-			statusText,
-			keyHint("app.clipboard.copyLoginUrl", status === "failed" ? "retry" : "copy"),
-			keyHint("tui.select.cancel", "cancel"),
-		]
+		return [statusText, copyHint, keyHint("tui.select.cancel", "cancel")]
 			.filter((part): part is string => part !== undefined)
 			.join("  ");
 	}
@@ -369,7 +386,11 @@ export class LoginDialogComponent extends Container implements Focusable {
 	handleInput(data: string): void {
 		const kb = getKeybindings();
 
-		if (!this.inputVisible && this.authUrl && kb.matches(data, "app.clipboard.copyLoginUrl")) {
+		if (
+			this.authUrl &&
+			kb.matches(data, "app.clipboard.copyLoginUrl") &&
+			(!this.inputVisible || !isPrintableInput(data))
+		) {
 			void this.copyAuthUrl();
 			return;
 		}
