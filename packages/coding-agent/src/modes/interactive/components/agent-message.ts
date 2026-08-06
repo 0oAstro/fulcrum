@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { type AgentSessionMessage, formatAgentMessageParticipant } from "../../../core/agent-messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
-import { keyText } from "./keybinding-hints.js";
+import { expandCollapseHint } from "./keybinding-hints.js";
 
 function collapseText(text: string): string {
 	return text.replace(/\s+/g, " ").trim();
@@ -84,13 +84,13 @@ export class AgentMessageComponent extends Container {
 		const sender = theme.fg("muted", participant);
 		const separator = theme.fg("dim", " · ");
 		if (this.expanded) {
-			const hint = theme.fg("dim", ` (${keyText("app.messages.expand")} to collapse)`);
-			return `${icon} ${title}${separator}${sender}${hint}`;
+			const hint = expandCollapseHint("app.messages.expand", true);
+			return `${icon} ${title}${separator}${sender} ${hint}`;
 		}
 
 		const prefixWidth = visibleWidth(`◆ Agent message received · ${participant} · `);
 		const preview = truncateToWidth(collapseText(this.message.details.message), Math.max(20, 100 - prefixWidth));
-		const hint = theme.fg("dim", ` (${keyText("app.messages.expand")} to expand)`);
-		return `${icon} ${title}${separator}${sender}${separator}${theme.fg("muted", preview)}${hint}`;
+		const hint = expandCollapseHint("app.messages.expand", false);
+		return `${icon} ${title}${separator}${sender}${separator}${theme.fg("muted", preview)} ${hint}`;
 	}
 }

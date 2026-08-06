@@ -1,5 +1,13 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { type Component, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	Spacer,
+	Text,
+	truncateToWidth,
+} from "@earendil-works/pi-tui";
 import { LOGIN_RECOVERY_MESSAGE } from "../../../core/auth-guidance.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import {
@@ -8,7 +16,7 @@ import {
 	shouldCollapseErrorDetails,
 	summarizeErrorDetails,
 } from "./collapsible-error.js";
-import { keyText } from "./keybinding-hints.js";
+import { expandCollapseHint } from "./keybinding-hints.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -36,6 +44,29 @@ function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
 		listBullet: quiet,
 		highlightCode: (code: string) => code.split("\n").map((line) => quiet(line)),
 	};
+}
+
+/**
+ * One-line recap for a collapsed thinking block: the last bold section header
+ * when the trace has one (reasoning summaries usually do), otherwise the first
+ * non-empty line, stripped of markdown emphasis and truncated.
+ */
+export function thinkingRecap(thinking: string, fallback: string, maxWidth = 80): string {
+	const lines = thinking
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0);
+	const lastHeader = [...lines].reverse().find((line) => /^\*\*[^*]+\*\*:?$/.test(line) || /^#{1,6}\s+\S/.test(line));
+	const source = lastHeader ?? lines[0] ?? fallback;
+	const plain = source
+		.replace(/^#{1,6}\s+/, "")
+		.replace(/\*\*([^*]+)\*\*/g, "$1")
+		.replace(/\*([^*]+)\*/g, "$1")
+		.replace(/`([^`]+)`/g, "$1")
+		.replace(/\s+/g, " ")
+		.replace(/:$/, "")
+		.trim();
+	return truncateToWidth(plain || fallback, Math.max(20, maxWidth));
 }
 
 function formatInlineLoginRecoveryMessage(message: string): string | undefined {
@@ -155,6 +186,11 @@ export class AssistantMessageComponent extends Container {
 				parts.push(`${i}:text:${content.text.trim() ? 1 : 0}`);
 			} else if (content.type === "thinking") {
 				parts.push(`${i}:thinking:${content.thinking.trim() ? 1 : 0}`);
+				if (this.hideThinkingBlock && content.thinking.trim()) {
+					// The collapsed row bakes the recap into a static line, so a recap
+					// change must count as a structural change during streaming.
+					parts.push(`${i}:recap:${thinkingRecap(content.thinking, this.hiddenThinkingLabel)}`);
+				}
 			} else {
 				parts.push(`${i}:${content.type}`);
 			}
@@ -225,20 +261,27 @@ export class AssistantMessageComponent extends Container {
 					.slice(i + 1)
 					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
+				const thinkingLabel = theme.bold(theme.fg("thinkingText", this.hiddenThinkingLabel));
 				if (this.hideThinkingBlock) {
-					// Show static thinking label when hidden, with the expand hint.
-					const label = theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel));
-					const hint = theme.fg("dim", ` (${keyText("app.thinking.toggle")} to expand)`);
-					this.contentContainer.addChild(new Text(`${label}${hint}`, 1, 0));
+					// Collapsed row: bold label, a one-line recap of the trace, and the hint.
+					const recap = thinkingRecap(content.thinking, this.hiddenThinkingLabel);
+					const separator = theme.fg("dim", " · ");
+					this.contentContainer.addChild(
+						new Text(
+							`${thinkingLabel}${separator}${theme.fg("thinkingText", recap)} ${expandCollapseHint("app.thinking.toggle", false)}`,
+							1,
+							0,
+						),
+					);
 					if (hasVisibleContentAfter) {
 						this.contentContainer.addChild(new Spacer(1));
 					}
 				} else {
-					// Label the visible trace so the collapse hint mirrors the hidden state.
-					const label = theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel));
-					const hint = theme.fg("dim", ` (${keyText("app.thinking.toggle")} to collapse)`);
-					this.contentContainer.addChild(new Text(`${label}${hint}`, 1, 0));
+					// Expanded: the same label line with the collapse hint, then the trace.
 					// Thinking traces keep Markdown structure but stay visually quiet.
+					this.contentContainer.addChild(
+						new Text(`${thinkingLabel} ${expandCollapseHint("app.thinking.toggle", true)}`, 1, 0),
+					);
 					const markdown = new Markdown(
 						content.thinking.trim(),
 						1,

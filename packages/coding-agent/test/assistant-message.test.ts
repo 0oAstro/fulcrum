@@ -1,7 +1,9 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { describe, expect, test } from "vitest";
-import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
+import { KeybindingsManager } from "../src/core/keybindings.js";
+import { AssistantMessageComponent, thinkingRecap } from "../src/modes/interactive/components/assistant-message.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -200,6 +202,41 @@ describe("AssistantMessageComponent streaming identity", () => {
 			const fresh = new AssistantMessageComponent(message).render(90);
 			expect(incremental).toEqual(fresh);
 		}
+	});
+
+	test("collapsed thinking shows a bold label, recap, and bracketed hint", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+
+		const thinking = [
+			"**Weighing options**",
+			"",
+			"Some detail about the options.",
+			"",
+			"**Deciding the approach**",
+			"",
+			"More detail.",
+		].join("\n");
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking },
+			{ type: "text", text: "Answer." },
+		]);
+		const rendered = stripAnsi(new AssistantMessageComponent(message, true).render(120).join("\n"));
+
+		expect(rendered).toContain("Thinking... · Deciding the approach (Ctrl+T to expand)");
+		expect(rendered).not.toContain("Some detail");
+
+		const expanded = stripAnsi(new AssistantMessageComponent(message, false).render(120).join("\n"));
+		expect(expanded).toContain("Thinking... (Ctrl+T to collapse)");
+		expect(expanded).toContain("Some detail about the options.");
+	});
+
+	test("thinkingRecap falls back to the first line and strips markdown", () => {
+		expect(thinkingRecap("plain first line\nsecond line", "Thinking...")).toBe("plain first line");
+		expect(thinkingRecap("## Section header\nbody", "Thinking...")).toBe("Section header");
+		expect(thinkingRecap("**Bold intro:**\nbody", "Thinking...")).toBe("Bold intro");
+		expect(thinkingRecap("   \n\t\n", "Thinking...")).toBe("Thinking...");
+		expect(thinkingRecap(`**${"very long ".repeat(30)}**`, "Thinking...").length).toBeLessThanOrEqual(83);
 	});
 
 	test("setHideThinkingBlock and setExpanded mid-stream render identically", () => {
