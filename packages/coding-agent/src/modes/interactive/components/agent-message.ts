@@ -84,12 +84,13 @@ export class AgentMessageComponent extends Container {
 		const sender = theme.fg("muted", participant);
 		const separator = theme.fg("dim", " · ");
 		if (this.expanded) {
-			return `${icon} ${title}${separator}${sender}`;
+			const hint = theme.fg("dim", ` (${keyText("app.messages.expand")} to collapse)`);
+			return `${icon} ${title}${separator}${sender}${hint}`;
 		}
 
 		const prefixWidth = visibleWidth(`◆ Agent message received · ${participant} · `);
 		const preview = truncateToWidth(collapseText(this.message.details.message), Math.max(20, 100 - prefixWidth));
-		const hint = theme.fg("dim", ` (${keyText("app.tools.expand")} to expand)`);
+		const hint = theme.fg("dim", ` (${keyText("app.messages.expand")} to expand)`);
 		return `${icon} ${title}${separator}${sender}${separator}${theme.fg("muted", preview)}${hint}`;
 	}
 }

@@ -210,11 +210,7 @@ import {
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
 import { countDirectSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
-import {
-	selectLatestToolExpandHint,
-	ToolExecutionComponent,
-	type ToolExecutionDefinition,
-} from "./components/tool-execution.js";
+import { ToolExecutionComponent, type ToolExecutionDefinition } from "./components/tool-execution.js";
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
@@ -937,6 +933,7 @@ export class InteractiveMode {
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
+	private agentMessagesExpanded = false;
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
@@ -1360,6 +1357,7 @@ export class InteractiveMode {
 						rawKeyHint("/effort", "to set thinking level"),
 						hint("app.model.select", "to select model"),
 						hint("app.tools.expand", "to expand tools"),
+						hint("app.messages.expand", "to expand agent messages"),
 						hint("app.thinking.toggle", "to expand thinking"),
 						hint("app.subagents.focus", "to inspect subagents"),
 						hint("app.editor.external", "for external editor"),
@@ -2963,7 +2961,6 @@ export class InteractiveMode {
 			if (this.startedToolCalls.has(latestToolCall.id)) {
 				component.markExecutionStarted();
 			}
-			selectLatestToolExpandHint(this.chatContainer.children, component);
 			this.chatContainer.addChild(component);
 			this.pendingTools.set(latestToolCall.id, component);
 			this.registerIpythonToolComponent(latestToolCall.name, latestToolCall.id, component);
@@ -4105,6 +4102,7 @@ export class InteractiveMode {
 		};
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
+		this.defaultEditor.onAction("app.messages.expand", () => this.toggleAgentMessageExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.subagents.focus", () => this.focusSubagentSummary());
 		this.defaultEditor.onAction("app.heartbeats.open", () => {
@@ -5903,6 +5901,10 @@ export class InteractiveMode {
 			this.toggleToolOutputExpansion();
 			return;
 		}
+		if (this.keybindings.matches(data, "app.messages.expand")) {
+			this.toggleAgentMessageExpansion();
+			return;
+		}
 		if (this.keybindings.matches(data, "app.thinking.toggle")) {
 			this.toggleThinkingBlockVisibility();
 			return;
@@ -6210,7 +6212,7 @@ export class InteractiveMode {
 														this.getMarkdownThemeWithSettings(),
 													);
 					if (!(component instanceof UserMessageComponent)) {
-						component.setExpanded(this.toolOutputExpanded);
+						component.setExpanded(this.expansionStateFor(component));
 					}
 					if (isSessionSlashCommandMessage(message) && this.chatContainer.children.length > 0) {
 						this.chatContainer.addChild(new Spacer(1));
@@ -6418,7 +6420,6 @@ export class InteractiveMode {
 							this.getCurrentCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						selectLatestToolExpandHint(this.chatContainer.children, component);
 						this.chatContainer.addChild(component);
 						this.registerIpythonToolComponent(content.name, content.id, component);
 
@@ -6943,15 +6944,29 @@ export class InteractiveMode {
 		this.setToolsExpanded(!this.toolOutputExpanded);
 	}
 
+	private toggleAgentMessageExpansion(): void {
+		this.agentMessagesExpanded = !this.agentMessagesExpanded;
+		this.applyChatExpansion();
+	}
+
 	private setToolsExpanded(expanded: boolean): void {
 		this.toolOutputExpanded = expanded;
+		this.applyChatExpansion();
+	}
+
+	/** Expansion state for a chat component: agent messages toggle separately from tools. */
+	private expansionStateFor(component: unknown): boolean {
+		return component instanceof AgentMessageComponent ? this.agentMessagesExpanded : this.toolOutputExpanded;
+	}
+
+	private applyChatExpansion(): void {
 		const activeHeader = this.customHeader ?? this.builtInHeader;
 		if (isExpandable(activeHeader)) {
-			activeHeader.setExpanded(expanded);
+			activeHeader.setExpanded(this.toolOutputExpanded);
 		}
 		for (const child of this.chatContainer.children) {
 			if (isExpandable(child)) {
-				child.setExpanded(expanded);
+				child.setExpanded(this.expansionStateFor(child));
 			}
 		}
 		// Expanding/collapsing changes blocks above the viewport, which would
@@ -9402,6 +9417,7 @@ export class InteractiveMode {
 		const shortcutsKey = this.getAppKeyDisplay("app.shortcuts");
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
+		const expandMessages = this.getAppKeyDisplay("app.messages.expand");
 		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
 		const promptStash = this.getAppKeyDisplay("app.prompt.stash");
@@ -9415,7 +9431,7 @@ export class InteractiveMode {
 
 **Controls**
 \`${selectModel}\` select model · \`/effort\` set reasoning · \`${expandTools}\` tool output
-\`${toggleThinking}\` thinking blocks · \`${promptStash}\` stash prompt · \`${externalEditor}\` edit in \`$EDITOR\`
+\`${expandMessages}\` agent messages · \`${toggleThinking}\` thinking blocks · \`${promptStash}\` stash prompt · \`${externalEditor}\` edit in \`$EDITOR\`
 \`${pasteImage}\` paste image
 
 **Help**
@@ -9453,6 +9469,7 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 		const exit = this.getAppKeyDisplay("app.exit");
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
+		const expandMessages = this.getAppKeyDisplay("app.messages.expand");
 		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const focusSubagents = this.getAppKeyDisplay("app.subagents.focus");
 		const manageHeartbeats = this.getAppKeyDisplay("app.heartbeats.open");
@@ -9500,6 +9517,7 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shortcutsKey ? `| \`${shortcutsKey}\` | Show quick shortcuts |\n` : ""}| \`${exit}\` | Exit (when editor is empty) |
 | \`${selectModel}\` | Open model selector |
 | \`${expandTools}\` | Toggle tool output expansion |
+| \`${expandMessages}\` | Toggle agent message expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${focusSubagents}\` | Focus the subagent summary / open the scoped agents view |
 | \`${manageHeartbeats}\` | Manage heartbeats |

@@ -8,6 +8,7 @@ import {
 	shouldCollapseErrorDetails,
 	summarizeErrorDetails,
 } from "./collapsible-error.js";
+import { keyText } from "./keybinding-hints.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -225,14 +226,18 @@ export class AssistantMessageComponent extends Container {
 					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
 				if (this.hideThinkingBlock) {
-					// Show static thinking label when hidden
-					this.contentContainer.addChild(
-						new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), 1, 0),
-					);
+					// Show static thinking label when hidden, with the expand hint.
+					const label = theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel));
+					const hint = theme.fg("dim", ` (${keyText("app.thinking.toggle")} to expand)`);
+					this.contentContainer.addChild(new Text(`${label}${hint}`, 1, 0));
 					if (hasVisibleContentAfter) {
 						this.contentContainer.addChild(new Spacer(1));
 					}
 				} else {
+					// Label the visible trace so the collapse hint mirrors the hidden state.
+					const label = theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel));
+					const hint = theme.fg("dim", ` (${keyText("app.thinking.toggle")} to collapse)`);
+					this.contentContainer.addChild(new Text(`${label}${hint}`, 1, 0));
 					// Thinking traces keep Markdown structure but stay visually quiet.
 					const markdown = new Markdown(
 						content.thinking.trim(),

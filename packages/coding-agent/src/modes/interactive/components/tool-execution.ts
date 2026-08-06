@@ -11,6 +11,7 @@ import { type Theme, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js";
 import { FileChangeSummaryComponent, getToolFileChanges } from "./edit-summary.js";
 import { getIpythonCodeFromArgs, IPythonCellComponent } from "./ipython-cell.js";
+import { keyHint } from "./keybinding-hints.js";
 import { ToolPanel } from "./tool-panel.js";
 
 export interface ToolExecutionOptions {
@@ -469,7 +470,11 @@ export class ToolExecutionComponent extends Container {
 
 	private panelHeader(): string {
 		const label = this.toolDefinition?.label ?? this.builtInToolDefinition?.label ?? this.toolName;
-		return `${theme.fg("muted", label)}${theme.fg("dim", " · ")}${this.panelStatus()}`;
+		const parts = [`${theme.fg("muted", label)}${theme.fg("dim", " · ")}${this.panelStatus()}`];
+		if (this.showExpandHint) {
+			parts.push(keyHint("app.tools.expand", this.expanded ? "to collapse" : "to expand"));
+		}
+		return parts.join(theme.fg("dim", " · "));
 	}
 
 	private panelStatus(): string {
@@ -503,18 +508,4 @@ export class ToolExecutionComponent extends Container {
 		}
 		return parts.join("\n\n");
 	}
-}
-
-export function selectLatestToolExpandHint(
-	existingComponents: readonly Component[],
-	latestComponent: ToolExecutionComponent,
-): void {
-	for (let index = existingComponents.length - 1; index >= 0; index--) {
-		const component = existingComponents[index];
-		if (component instanceof ToolExecutionComponent) {
-			component.setShowExpandHint(false);
-			break;
-		}
-	}
-	latestComponent.setShowExpandHint(true);
 }

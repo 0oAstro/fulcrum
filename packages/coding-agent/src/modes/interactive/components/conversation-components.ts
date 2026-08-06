@@ -20,12 +20,7 @@ import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./injec
 import { IPythonCellComponent } from "./ipython-cell.js";
 import { SlashCommandMessageComponent } from "./slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./slash-command-result-message.js";
-import {
-	selectLatestToolExpandHint,
-	ToolExecutionComponent,
-	type ToolExecutionDefinition,
-	type ToolExecutionOptions,
-} from "./tool-execution.js";
+import { ToolExecutionComponent, type ToolExecutionDefinition, type ToolExecutionOptions } from "./tool-execution.js";
 import { UserMessageComponent } from "./user-message.js";
 
 export interface ConversationComponentsOptions {
@@ -37,6 +32,7 @@ export interface ConversationComponentsOptions {
 	hideThinkingBlock?: boolean;
 	hiddenThinkingLabel?: string;
 	toolsExpanded?: boolean;
+	agentMessagesExpanded?: boolean;
 	isRecognizedSlashCommand?: (name: string) => boolean;
 }
 
@@ -69,6 +65,7 @@ export function buildConversationComponents(
 	const components: Component[] = [];
 	const pendingTools = new Map<string, ToolExecutionComponent>();
 	const expanded = options.toolsExpanded ?? false;
+	const agentMessagesExpanded = options.agentMessagesExpanded ?? false;
 
 	for (const message of messages) {
 		if (message.role === "assistant") {
@@ -102,7 +99,6 @@ export function buildConversationComponents(
 				tool.setExpanded(expanded);
 				tool.markExecutionStarted();
 				tool.setArgsComplete();
-				selectLatestToolExpandHint(components, tool);
 				components.push(tool);
 				if (message.stopReason === "aborted" || message.stopReason === "error") {
 					tool.updateResult({
@@ -140,7 +136,7 @@ export function buildConversationComponents(
 			const component = new AgentMessageComponent(message, options.markdownTheme, {
 				suppressLeadingSpace: isCompactAgentMessageNeighbor(components.at(-1)),
 			});
-			component.setExpanded(expanded);
+			component.setExpanded(agentMessagesExpanded);
 			components.push(component);
 		} else if (isInjectedPromptMessage(message) && message.display) {
 			const component = new InjectedPromptMessageComponent(message, options.markdownTheme);

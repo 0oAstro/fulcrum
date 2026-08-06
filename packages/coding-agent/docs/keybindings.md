@@ -129,6 +129,7 @@ Use `tab` to cycle forward and `shift+tab` to cycle backward through Providers, 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
+| `app.messages.expand` | `ctrl+p` | Collapse or expand agent-to-agent messages |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
 | `app.message.dequeue` | `alt+up` | Restore queued messages to editor |
 

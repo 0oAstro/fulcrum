@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Added `app.messages.expand` (`ctrl+p`) to collapse or expand agent-to-agent messages separately from `ctrl+o` tool output.
+- Added a `ctrl+t` expand/collapse hint to thinking blocks, matching the tool output hint.
+- Changed the `ctrl+o` expand hint to show on every collapsed or expanded tool row instead of only the latest one, including generic tool panels.
+
 ## [0.7.0] - 2026-08-05
 
 ### Breaking Changes
