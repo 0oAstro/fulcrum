@@ -189,7 +189,8 @@ export class AssistantMessageComponent extends Container {
 				if (this.hideThinkingBlock && content.thinking.trim()) {
 					// The collapsed row bakes the recap into a static line, so a recap
 					// change must count as a structural change during streaming.
-					parts.push(`${i}:recap:${thinkingRecap(content.thinking, this.hiddenThinkingLabel)}`);
+					// JSON-encode the free text so it cannot forge part boundaries.
+					parts.push(`${i}:recap:${JSON.stringify(thinkingRecap(content.thinking, this.hiddenThinkingLabel))}`);
 				}
 			} else {
 				parts.push(`${i}:${content.type}`);

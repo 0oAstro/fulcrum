@@ -231,6 +231,28 @@ describe("AssistantMessageComponent streaming identity", () => {
 		expect(expanded).toContain("Some detail about the options.");
 	});
 
+	test("recap text with delimiters cannot mask structural changes", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+
+		// Unescaped, the first recap "X|1:text:1" makes this signature identical
+		// to the next structure's (recap "X" plus a real text block), so the
+		// rebuild that renders the new text block would be skipped.
+		const component = new AssistantMessageComponent(undefined, true);
+		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "X|1:text:1" }]));
+		component.render(120);
+
+		component.updateContent(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "X" },
+				{ type: "text", text: "Visible answer." },
+			]),
+		);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+
+		expect(rendered).toContain("Visible answer.");
+	});
+
 	test("thinkingRecap falls back to the first line and strips markdown", () => {
 		expect(thinkingRecap("plain first line\nsecond line", "Thinking...")).toBe("plain first line");
 		expect(thinkingRecap("## Section header\nbody", "Thinking...")).toBe("Section header");
