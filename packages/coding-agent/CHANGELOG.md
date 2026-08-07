@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed ACP returning a silent `end_turn` before a requested compaction resumed the agent.
 - Fixed resident daemon workers retaining their launch environment across supervisor restarts while keeping client-owned credentials out of descriptor files.
 
 ## [0.7.0] - 2026-08-05
