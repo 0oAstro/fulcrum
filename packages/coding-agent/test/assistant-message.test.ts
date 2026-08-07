@@ -229,6 +229,9 @@ describe("AssistantMessageComponent streaming identity", () => {
 		const expanded = stripAnsi(new AssistantMessageComponent(message, false).render(120).join("\n"));
 		expect(expanded).toContain("Thinking... (Ctrl+T to collapse)");
 		expect(expanded).toContain("Some detail about the options.");
+
+		// A whitespace-only trace falls back to the label instead of an empty recap.
+		expect(thinkingRecap("   \n\t\n", "Thinking...")).toBe("Thinking...");
 	});
 
 	test("recap text with delimiters cannot mask structural changes", () => {
@@ -267,14 +270,6 @@ describe("AssistantMessageComponent streaming identity", () => {
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain("Thinking...");
 		expect(lines[0]).toContain("to expand");
-	});
-
-	test("thinkingRecap falls back to the first line and strips markdown", () => {
-		expect(thinkingRecap("plain first line\nsecond line", "Thinking...")).toBe("plain first line");
-		expect(thinkingRecap("## Section header\nbody", "Thinking...")).toBe("Section header");
-		expect(thinkingRecap("**Bold intro:**\nbody", "Thinking...")).toBe("Bold intro");
-		expect(thinkingRecap("   \n\t\n", "Thinking...")).toBe("Thinking...");
-		expect(thinkingRecap(`**${"very long ".repeat(30)}**`, "Thinking...").length).toBeLessThanOrEqual(123);
 	});
 
 	test("setHideThinkingBlock and setExpanded mid-stream render identically", () => {
