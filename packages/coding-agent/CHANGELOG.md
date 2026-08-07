@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed resident daemon workers retaining their launch environment across supervisor restarts while keeping client-owned credentials out of descriptor files.
+
 ## [0.7.0] - 2026-08-05
 
 ### Breaking Changes
