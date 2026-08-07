@@ -7,6 +7,7 @@ import {
 	Spacer,
 	Text,
 	truncateToWidth,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { LOGIN_RECOVERY_MESSAGE } from "../../../core/auth-guidance.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
@@ -46,12 +47,32 @@ function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
 	};
 }
 
+/** Single collapsed-thinking row that truncates the recap to the render width instead of wrapping. */
+class CollapsedThinkingRow implements Component {
+	constructor(
+		private readonly label: string,
+		private readonly recap: string,
+		private readonly hint: string,
+	) {}
+
+	render(width: number): string[] {
+		const safeWidth = Math.max(1, width);
+		const separator = theme.fg("dim", " · ");
+		const fixedWidth = visibleWidth(` ${this.label}${separator} ${this.hint}`);
+		const recapWidth = Math.max(8, safeWidth - fixedWidth);
+		const recap = theme.fg("thinkingText", truncateToWidth(this.recap, recapWidth));
+		return [truncateToWidth(` ${this.label}${separator}${recap} ${this.hint}`, safeWidth, "")];
+	}
+
+	invalidate(): void {}
+}
+
 /**
  * One-line recap for a collapsed thinking block: the last bold section header
  * when the trace has one (reasoning summaries usually do), otherwise the first
  * non-empty line, stripped of markdown emphasis and truncated.
  */
-export function thinkingRecap(thinking: string, fallback: string, maxWidth = 80): string {
+export function thinkingRecap(thinking: string, fallback: string, maxWidth = 120): string {
 	const lines = thinking
 		.split("\n")
 		.map((line) => line.trim())
@@ -264,15 +285,12 @@ export class AssistantMessageComponent extends Container {
 
 				const thinkingLabel = theme.bold(theme.fg("thinkingText", this.hiddenThinkingLabel));
 				if (this.hideThinkingBlock) {
-					// Collapsed row: bold label, a one-line recap of the trace, and the hint.
+					// Collapsed row: bold label, a one-line recap of the trace, and the
+					// hint. The row truncates the recap to the render width so it never
+					// wraps onto a second line on narrow terminals.
 					const recap = thinkingRecap(content.thinking, this.hiddenThinkingLabel);
-					const separator = theme.fg("dim", " · ");
 					this.contentContainer.addChild(
-						new Text(
-							`${thinkingLabel}${separator}${theme.fg("thinkingText", recap)} ${expandCollapseHint("app.thinking.toggle", false)}`,
-							1,
-							0,
-						),
+						new CollapsedThinkingRow(thinkingLabel, recap, expandCollapseHint("app.thinking.toggle", false)),
 					);
 					if (hasVisibleContentAfter) {
 						this.contentContainer.addChild(new Spacer(1));

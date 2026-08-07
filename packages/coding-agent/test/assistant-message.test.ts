@@ -253,12 +253,28 @@ describe("AssistantMessageComponent streaming identity", () => {
 		expect(rendered).toContain("Visible answer.");
 	});
 
+	test("collapsed thinking row truncates instead of wrapping on narrow widths", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+
+		const thinking = `**${"A deliberately verbose reasoning summary header that keeps going ".repeat(3).trim()}**`;
+		const message = createAssistantMessage([{ type: "thinking", thinking }]);
+		const lines = new AssistantMessageComponent(message, true)
+			.render(60)
+			.map((line) => stripAnsi(line))
+			.filter((line) => line.trim().length > 0);
+
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("Thinking...");
+		expect(lines[0]).toContain("to expand");
+	});
+
 	test("thinkingRecap falls back to the first line and strips markdown", () => {
 		expect(thinkingRecap("plain first line\nsecond line", "Thinking...")).toBe("plain first line");
 		expect(thinkingRecap("## Section header\nbody", "Thinking...")).toBe("Section header");
 		expect(thinkingRecap("**Bold intro:**\nbody", "Thinking...")).toBe("Bold intro");
 		expect(thinkingRecap("   \n\t\n", "Thinking...")).toBe("Thinking...");
-		expect(thinkingRecap(`**${"very long ".repeat(30)}**`, "Thinking...").length).toBeLessThanOrEqual(83);
+		expect(thinkingRecap(`**${"very long ".repeat(30)}**`, "Thinking...").length).toBeLessThanOrEqual(123);
 	});
 
 	test("setHideThinkingBlock and setExpanded mid-stream render identically", () => {
