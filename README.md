@@ -49,6 +49,17 @@ fulcrum update [--force]         # Update Fulcrum
 fulcrum shutdown [--force]       # Stop every agent, worker, and background service
 ```
 
+## Releases and updates
+
+The `0oAstro/fulcrum` fork publishes GitHub Releases from `main`. Push local changes to that fork; the release workflow publishes the beta channel, and installed beta copies can pull the result with:
+
+```bash
+git push fork main
+fulcrum update
+```
+
+Stable releases are published from version tags or a manual stable workflow run.
+
 ## Built for Long-Running Work
 Fulcrum is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
 
