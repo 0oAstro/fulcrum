@@ -81,6 +81,22 @@ export function comparePackageVersions(leftVersion: string, rightVersion: string
 }
 
 export function isNewerPackageVersion(candidateVersion: string, currentVersion: string): boolean {
+	const candidate = parsePackageVersion(candidateVersion);
+	const current = parsePackageVersion(currentVersion);
+	if (
+		candidate &&
+		current &&
+		candidate.major === current.major &&
+		candidate.minor === current.minor &&
+		candidate.patch === current.patch &&
+		candidate.prerelease?.startsWith("beta") &&
+		current.prerelease?.startsWith("beta")
+	) {
+		// The beta release is a mutable channel. Its generated versions contain
+		// a run/commit identifier, which is not a meaningful ordering key.
+		return candidate.prerelease !== current.prerelease;
+	}
+
 	const comparison = comparePackageVersions(candidateVersion, currentVersion);
 	if (comparison !== undefined) {
 		return comparison > 0;

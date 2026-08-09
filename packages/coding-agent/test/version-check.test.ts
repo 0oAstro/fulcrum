@@ -46,6 +46,8 @@ describe("version checks", () => {
 		expect(comparePackageVersions("0.70.5-beta.10.1.abcdef0", "0.70.5-beta.9.1.1234567")).toBeGreaterThan(0);
 		expect(isNewerPackageVersion("0.70.5", "0.70.5")).toBe(false);
 		expect(isNewerPackageVersion("0.70.6", "0.70.5")).toBe(true);
+		expect(isNewerPackageVersion("0.70.5-beta.manual.3fd8aad", "0.70.5-beta.manual.6d958ef")).toBe(true);
+		expect(isNewerPackageVersion("0.70.5-beta.manual.6d958ef", "0.70.5-beta.manual.6d958ef")).toBe(false);
 	});
 
 	it("returns only newer versions", async () => {
