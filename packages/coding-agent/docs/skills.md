@@ -1,10 +1,10 @@
-> Prime Agent can create skills. Ask it to build one for your use case.
+> Fulcrum can create skills. Ask it to build one for your use case.
 
 # Skills
 
-Skills are self-contained capability packages that Prime Agent loads on demand. A skill provides specialized workflows, setup instructions, helper scripts, and reference documentation for specific tasks.
+Skills are self-contained capability packages that Fulcrum loads on demand. A skill provides specialized workflows, setup instructions, helper scripts, and reference documentation for specific tasks.
 
-Prime Agent implements the [Agent Skills standard](https://agentskills.io/specification), warning about violations but remaining lenient. It also supports Python-backed skills: a superset of markdown skills that install Python packages into the persistent IPython kernel.
+Fulcrum implements the [Agent Skills standard](https://agentskills.io/specification), warning about violations but remaining lenient. It also supports Python-backed skills: a superset of markdown skills that install Python packages into the persistent IPython kernel.
 
 ## Table of Contents
 
@@ -12,7 +12,7 @@ Prime Agent implements the [Agent Skills standard](https://agentskills.io/specif
 - [Built-in Skills](#built-in-skills)
 - [How Skills Work](#how-skills-work)
 - [Python-Backed Skills](#python-backed-skills)
-- [Creating Skills with Prime Agent](#creating-skills-with-prime-agent)
+- [Creating Skills with Fulcrum](#creating-skills-with-fulcrum)
 - [Skill Commands](#skill-commands)
 - [Skill Structure](#skill-structure)
 - [Frontmatter](#frontmatter)
@@ -24,71 +24,30 @@ Prime Agent implements the [Agent Skills standard](https://agentskills.io/specif
 
 > **Security:** Skills can instruct the model to perform any action and may include executable code the model invokes. Review skill content before use.
 
-Prime Agent loads skills from:
+Fulcrum loads skills from:
 
 - Global:
-  - `~/.prime/agent/skills/`
-  - `~/.agents/skills/`
+  - `~/.fulcrum/skills/`
 - Project:
-  - `.prime/agent/skills/`
-  - `.agents/skills/` in `cwd` and ancestor directories (up to git repo root, or filesystem root when not in a repo)
+  - `.fulcrum/skills/`
 - Packages: `skills/` directories or `pi.skills` entries in `package.json`
 - Settings: `skills` array with files or directories
 - CLI: `--skill <path>` (repeatable, additive even with `--no-skills`)
-- Built-in: `skills/` shipped with the prime-agent package (lowest precedence)
+- Built-in: `skills/` shipped with the fulcrum package (lowest precedence)
 
 Discovery rules:
-- In `~/.prime/agent/skills/` and `.prime/agent/skills/`, direct root `.md` files are discovered as individual skills
+- In `~/.fulcrum/skills/` and `.fulcrum/skills/`, direct root `.md` files are discovered as individual skills
 - In all skill locations, directories containing `SKILL.md` are discovered recursively
-- In `~/.agents/skills/` and project `.agents/skills/`, root `.md` files are ignored
 
 Disable discovery with `--no-skills` (explicit `--skill` paths still load).
 
 ## Built-in Skills
 
-Prime Agent ships with built-in skills that load by default:
+Fulcrum ships with built-in skills that load by default:
 
-- `prime-intellect` - Prime Intellect products and workflows via the prime CLI: verifiers environments and the Environments Hub, evaluations (local and hosted), Hosted Training and prime-rl, sandboxes, tunnels, Prime Inference, GPU compute, and storage. Reference docs for each area load on demand from the skill's `references/` directory.
 - `skill-creator` - teaches the agent to create new skills: markdown skill layout, frontmatter rules, placement and precedence, and the full Python-backed skill contract (package layout, `run()` convention, optional CLI, kernel venv behavior) with a working template in `references/python-skills.md`.
-- `websearch` - a Python-backed Google search skill using the [Serper](https://serper.dev) API.
 
 Built-in skills behave like any other skill but have the lowest precedence: a user, project, package, or `--skill` skill with the same name overrides the built-in one.
-
-### websearch
-
-Setup: get a free API key at [serper.dev](https://serper.dev), then run `/login`,
-switch to **MCP Connections** using the displayed tab shortcuts, and choose
-**Serper (web search)** to paste it. The key is stored alongside your other
-credentials (in `auth.json`) and read by the skill on each call — no environment
-variables required, and it works even if you add the key mid-session.
-
-Optional overrides (environment variables):
-
-```bash
-export PRIME_AGENT_WEBSEARCH_TIMEOUT=45
-export PRIME_AGENT_WEBSEARCH_NUM_RESULTS=5
-```
-
-A `SERPER_API_KEY` in the environment, if set, takes precedence over the stored key.
-
-Once loaded, the model can call it directly in the IPython kernel by import name:
-
-```python
-print(await websearch("latest Prime Agent release"))
-```
-
-Until a key is configured, web search returns a clear message telling the agent
-to walk you through `/login`.
-
-Disable only the built-in `websearch` skill in settings:
-
-```json
-{
-  "bundledSkills": {
-    "websearch": false
-  }
-}
-```
 
 To disable all built-in skills, set `enableBuiltinSkills` to `false` in `settings.json` (or toggle "Built-in skills" in `/settings`):
 
@@ -98,13 +57,21 @@ To disable all built-in skills, set `enableBuiltinSkills` to `false` in `setting
 }
 ```
 
-`--no-skills` also excludes built-in skills. To disable a single built-in skill without a dedicated setting, force-exclude it in the global `skills` array (patterns resolve against the built-in skills directory):
+The first-party `websearch` Python module and focused `browser.fetch` helper are pre-imported separately from skills and are unaffected by skill discovery settings. They use Fulcrum's host-side Firecrawl service credentials, configured through `/login` under **MCP Connections**.
 
-```json
-{
-  "skills": ["-prime-intellect/SKILL.md"]
-}
+```python
+results = await websearch.search("query", limit=5, recency="week")
+page = await websearch.open("https://example.com", formats=["markdown"])
+report = await websearch.research("current or contested topic", follow_up_queries=2)
+focused = await browser.fetch("https://example.com", "Extract the pricing and limits.")
+links = await websearch.map("https://example.com", limit=100)
 ```
+
+Results remain available in the persistent kernel for subsequent cells. The Firecrawl key stays in the Fulcrum host and is not exported to the kernel.
+Use `search` by default for factual lookups. `research` performs multi-query search and source scraping, so reserve it for contested, high-stakes, or genuinely multi-source questions and pass explicit `queries=[...]` when the useful research axes are known. With a configured `websearch.researchModel`, it assesses cleaned initial page evidence and can run one adaptive round of up to two queries for unresolved constraints or primary records; pass `follow_up_queries=0` to disable that round. Exact answers are accepted only when synthesis identifies direct support in a cited extract.
+`browser.fetch` uses Firecrawl's main-content extraction, then asks the cheapest configured authenticated text model
+to follow the supplied extraction instruction. It falls back to deterministic compact page content when no model is
+available or extraction fails.
 
 ### Using Skills from Other Harnesses
 
@@ -119,7 +86,7 @@ To use skills from Claude Code or OpenAI Codex, add their directories to setting
 }
 ```
 
-For project-level Claude Code skills, add to `.prime/agent/settings.json`:
+For project-level Claude Code skills, add to `.fulcrum/settings.json`:
 
 ```json
 {
@@ -129,7 +96,7 @@ For project-level Claude Code skills, add to `.prime/agent/settings.json`:
 
 ## How Skills Work
 
-1. At startup, Prime Agent scans skill locations and extracts names, descriptions, type, and file locations
+1. At startup, Fulcrum scans skill locations and extracts names, descriptions, type, and file locations
 2. The system prompt includes visible skills in XML format per the [specification](https://agentskills.io/integrate-skills)
 3. When a task matches, the agent uses `ipython` to load the full `SKILL.md` (models don't always do this; use prompting or `/skill:name` to force it)
 4. The agent follows the instructions, using relative paths to reference scripts and assets
@@ -157,17 +124,17 @@ Detection rules:
 - the import name is the skill name with hyphens converted to underscores
 - `src/<import_name>/__init__.py` must exist
 
-For `web-search`, Prime Agent exposes `web_search` in IPython. If the module defines `run()`, the module is wrapped as an async callable:
+For `web-search`, Fulcrum exposes `web_search` in IPython. If the module defines `run()`, the module is wrapped as an async callable:
 
 ```python
-await web_search("prime agent skills")
-await web_search.run("prime agent skills")
+await web_search("fulcrum skills")
+await web_search.run("fulcrum skills")
 help(web_search)
 ```
 
-Python skills are installed editable into the kernel venv during kernel setup. By default this is `~/.prime/agent/kernel-venv`; set `PRIME_AGENT_KERNEL_VENV` to override it. If `pyproject.toml` changes, Prime Agent rebuilds the kernel venv so dependency changes are picked up.
+Python skills are installed editable into the kernel venv during kernel setup. By default this is `~/.fulcrum/kernel-venv`; set `FULCRUM_KERNEL_VENV` to override it. If `pyproject.toml` changes, Fulcrum rebuilds the kernel venv so dependency changes are picked up.
 
-If you set `PRIME_AGENT_KERNEL_PYTHON`, Prime Agent does not install packages into that environment. The Python must already have `ipykernel`, `prime-agent-runtime`, and the default runtime packages installed. Missing Python skill imports are disabled with a warning and calling the skill raises a `RuntimeError`.
+If you set `FULCRUM_KERNEL_PYTHON`, Fulcrum does not install packages into that environment. The Python must already have `ipykernel`, `fulcrum-runtime`, and the default runtime packages installed. Missing Python skill imports are disabled with a warning and calling the skill raises a `RuntimeError`.
 
 ### Optional CLI Command
 
@@ -194,20 +161,20 @@ async def run(query: str, limit: int = 5) -> str:
 The model can then call the skill from normal Python or from shell mode:
 
 ```python
-await web_search("prime agent")
-!web_search "prime agent" --limit 3
+await web_search("fulcrum agent")
+!web_search "fulcrum agent" --limit 3
 ```
 
-## Creating Skills with Prime Agent
+## Creating Skills with Fulcrum
 
-Prime Agent ships with a built-in `skill-creator` skill that teaches the agent both the Agent Skills format and the Python-backed package contract. You can ask for a skill in normal language:
+Fulcrum ships with a built-in `skill-creator` skill that teaches the agent both the Agent Skills format and the Python-backed package contract. You can ask for a skill in normal language:
 
 ```text
 Create a project Python-backed skill named release-audit in
-.prime/agent/skills/release-audit. It should expose
+.fulcrum/skills/release-audit. It should expose
 await release_audit(repository, target_version), include concise SKILL.md
 instructions, declare its dependencies, and verify the callable in a fresh
-Prime Agent session.
+Fulcrum session.
 ```
 
 To force the creation workflow explicitly, invoke the built-in skill command:
@@ -218,13 +185,13 @@ To force the creation workflow explicitly, invoke the built-in skill command:
 
 Tell the agent three things:
 
-1. **Scope:** use `.prime/agent/skills/<name>/` for a project skill committed with the repository, or `~/.prime/agent/skills/<name>/` for a personal skill.
+1. **Scope:** use `.fulcrum/skills/<name>/` for a project skill committed with the repository, or `~/.fulcrum/skills/<name>/` for a personal skill.
 2. **Kind:** ask for a markdown skill when the capability is primarily instructions; ask for a Python-backed skill when the agent should call reusable functionality from IPython.
 3. **Contract:** describe the intended Python call, inputs, output, dependencies, credentials, and verification behavior.
 
 The agent should create `SKILL.md` in both cases. For a Python-backed skill it should also create `pyproject.toml` and `src/<import_name>/__init__.py`, expose a documented callable, and verify that the package imports in the kernel.
 
-Use `/reload` to rediscover new or edited skill metadata. Start a fresh Prime Agent session after adding a Python-backed skill so kernel setup can install and import the package.
+Use `/reload` to rediscover new or edited skill metadata. Start a fresh Fulcrum session after adding a Python-backed skill so kernel setup can install and import the package.
 
 ### Installed Skills and Continual Harness Skills
 
@@ -335,7 +302,7 @@ description: Helps with PDFs.
 
 ## Validation
 
-Prime Agent validates skills against the Agent Skills standard. Most issues produce warnings but still load the skill:
+Fulcrum validates skills against the Agent Skills standard. Most issues produce warnings but still load the skill:
 
 - Name doesn't match parent directory
 - Name exceeds 64 characters or contains invalid characters

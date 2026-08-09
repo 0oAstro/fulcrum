@@ -1,6 +1,6 @@
 # Examples
 
-Example code for the Prime Agent SDK and extension system.
+Example code for the Fulcrum SDK and extension system.
 
 ## Directories
 

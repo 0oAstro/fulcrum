@@ -1,4 +1,4 @@
-import type { existsSync, readFileSync } from "node:fs";
+import type { existsSync, readFileSync, statSync } from "node:fs";
 import type { homedir } from "node:os";
 import type { join } from "node:path";
 import type { KnownProvider } from "./types.js";
@@ -6,6 +6,7 @@ import type { KnownProvider } from "./types.js";
 // NEVER convert to top-level runtime imports - breaks browser/Vite builds
 let _existsSync: typeof existsSync | null = null;
 let _readFileSync: typeof readFileSync | null = null;
+let _statSync: typeof statSync | null = null;
 let _homedir: typeof homedir | null = null;
 let _join: typeof join | null = null;
 
@@ -16,18 +17,56 @@ const NODE_FS_SPECIFIER = "node:" + "fs";
 const NODE_OS_SPECIFIER = "node:" + "os";
 const NODE_PATH_SPECIFIER = "node:" + "path";
 
+let envApiKeysReady = Promise.resolve();
+
 // Eagerly load in Node.js/Bun environment only
 if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
-	dynamicImport(NODE_FS_SPECIFIER).then((m) => {
+	const fsPromise = dynamicImport(NODE_FS_SPECIFIER).then((m) => {
 		_existsSync = (m as { existsSync: typeof existsSync }).existsSync;
 		_readFileSync = (m as { readFileSync: typeof readFileSync }).readFileSync;
+		_statSync = (m as { statSync: typeof statSync }).statSync;
 	});
-	dynamicImport(NODE_OS_SPECIFIER).then((m) => {
+	const osPromise = dynamicImport(NODE_OS_SPECIFIER).then((m) => {
 		_homedir = (m as { homedir: typeof homedir }).homedir;
 	});
-	dynamicImport(NODE_PATH_SPECIFIER).then((m) => {
+	const pathPromise = dynamicImport(NODE_PATH_SPECIFIER).then((m) => {
 		_join = (m as { join: typeof join }).join;
 	});
+	// A browser-compatible build may reject a node: import. Keep readiness
+	// best-effort, matching the existing synchronous availability semantics.
+	envApiKeysReady = Promise.all([fsPromise, osPromise, pathPromise]).then(
+		() => undefined,
+		() => undefined,
+	);
+}
+
+/** Wait for Node's browser-safe environment helpers to finish loading. */
+export async function waitForEnvApiKeysReady(): Promise<void> {
+	await envApiKeysReady;
+}
+
+// Node 22+ exposes built-ins synchronously. Use that path when available so
+// startup model discovery does not race the browser-safe dynamic imports.
+if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
+	try {
+		const getBuiltinModule = process.getBuiltinModule;
+		if (getBuiltinModule) {
+			const fs = getBuiltinModule("node:fs") as {
+				existsSync: typeof existsSync;
+				readFileSync: typeof readFileSync;
+				statSync: typeof statSync;
+			};
+			const os = getBuiltinModule("node:os") as { homedir: typeof homedir };
+			const path = getBuiltinModule("node:path") as { join: typeof join };
+			_existsSync ??= fs.existsSync;
+			_readFileSync ??= fs.readFileSync;
+			_statSync ??= fs.statSync;
+			_homedir ??= os.homedir;
+			_join ??= path.join;
+		}
+	} catch {
+		// Older Node versions fall back to the dynamic imports above.
+	}
 }
 
 let _procEnvCache: Map<string, string> | null = null;
@@ -60,6 +99,143 @@ function getProcEnv(key: string): string | undefined {
 	}
 
 	return _procEnvCache.get(key);
+}
+
+export type AwsProfileConfig = {
+	/** Profile selected by the AWS SDK credential/configuration chain. */
+	profile: string;
+	/** Region declared by the selected shared AWS config profile. */
+	region?: string;
+	/** Whether either shared file contains a section for this profile. */
+	hasProfile: boolean;
+	/** Whether the profile describes a credential source the SDK can use. */
+	hasCredentialSource: boolean;
+};
+
+/**
+ * Read an environment value, including Bun's /proc fallback.
+ *
+ * This is intentionally a synchronous hint only. The AWS SDK remains the
+ * authority for resolving and refreshing credentials when a request is sent.
+ */
+export function getAwsEnvironmentValue(name: string): string | undefined {
+	if (typeof process === "undefined") return undefined;
+	return process.env[name] || getProcEnv(name);
+}
+
+type AwsIni = Record<string, Record<string, string>>;
+
+function parseAwsIni(content: string): AwsIni {
+	const sections: AwsIni = {};
+	let current: Record<string, string> | undefined;
+
+	for (const rawLine of content.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+
+		const sectionMatch = /^\[([^\]]+)\]$/.exec(line);
+		if (sectionMatch) {
+			const sectionName = sectionMatch[1]!.trim().replace(/^profile\s+/i, "");
+			current = sections[sectionName] ?? {};
+			sections[sectionName] = current;
+			continue;
+		}
+
+		if (!current) continue;
+		const separator = line.indexOf("=");
+		if (separator <= 0) continue;
+		const key = line.slice(0, separator).trim().toLowerCase();
+		const value = line.slice(separator + 1).trim();
+		if (key) current[key] = value;
+	}
+
+	return sections;
+}
+
+function readAwsIni(path: string | undefined): AwsIni {
+	if (!path || !_existsSync || !_readFileSync || !_existsSync(path)) return {};
+	try {
+		return parseAwsIni(_readFileSync(path, "utf-8"));
+	} catch {
+		return {};
+	}
+}
+
+function getAwsConfigPath(name: "config" | "credentials"): string | undefined {
+	const environmentName = name === "config" ? "AWS_CONFIG_FILE" : "AWS_SHARED_CREDENTIALS_FILE";
+	const override = getAwsEnvironmentValue(environmentName);
+	if (override) return override;
+	if (!_homedir || !_join) return undefined;
+	return _join(_homedir(), ".aws", name);
+}
+
+function hasAwsCredentialSource(profile: string, config: AwsIni, credentials: AwsIni, visited: Set<string>): boolean {
+	if (visited.has(profile)) return false;
+	visited.add(profile);
+
+	const values = { ...(config[profile] ?? {}), ...(credentials[profile] ?? {}) };
+	if (values.aws_access_key_id && values.aws_secret_access_key) return true;
+	if (values.credential_process) return true;
+	if (values.sso_start_url || values.sso_session || (values.sso_account_id && values.sso_role_name)) return true;
+	if (values.web_identity_token_file) return true;
+	if (values.credential_source) return true;
+
+	if (values.role_arn && values.source_profile) {
+		return hasAwsCredentialSource(values.source_profile, config, credentials, visited);
+	}
+
+	return false;
+}
+
+let cachedAwsProfileLookup: { key: string; result: AwsProfileConfig | undefined } | undefined;
+
+function getAwsFileFingerprint(path: string | undefined): string {
+	if (!path || !_statSync) return "unavailable";
+	try {
+		const stat = _statSync(path);
+		return `${stat.mtimeMs}:${stat.size}`;
+	} catch {
+		return "missing";
+	}
+}
+
+/**
+ * Resolve the selected shared AWS profile enough for model availability and
+ * endpoint hints. This deliberately does not execute credential_process,
+ * refresh SSO tokens, or contact metadata services; BedrockRuntimeClient does
+ * that asynchronously when it sends a request.
+ */
+export function getAwsProfileConfig(profile?: string): AwsProfileConfig | undefined {
+	// The dynamic Node imports above may not have completed during module startup.
+	// Do not cache a negative result until every path helper is ready.
+	if (!_existsSync || !_readFileSync || !_statSync || !_homedir || !_join) return undefined;
+
+	const selectedProfile = profile || getAwsEnvironmentValue("AWS_PROFILE") || "default";
+	const configPath = getAwsConfigPath("config");
+	const credentialsPath = getAwsConfigPath("credentials");
+	const cacheKey = `${selectedProfile}\0${configPath ?? ""}\0${credentialsPath ?? ""}\0${getAwsFileFingerprint(configPath)}\0${getAwsFileFingerprint(credentialsPath)}`;
+	if (cachedAwsProfileLookup?.key === cacheKey) return cachedAwsProfileLookup.result;
+
+	const config = readAwsIni(configPath);
+	const credentials = readAwsIni(credentialsPath);
+	const configValues = config[selectedProfile];
+	const credentialValues = credentials[selectedProfile];
+	const hasProfile = Boolean(configValues || credentialValues);
+	if (!hasProfile) {
+		cachedAwsProfileLookup = { key: cacheKey, result: undefined };
+		return undefined;
+	}
+
+	const result: AwsProfileConfig = {
+		profile: selectedProfile,
+		...(configValues?.region || credentialValues?.region
+			? { region: configValues?.region ?? credentialValues?.region }
+			: {}),
+		hasProfile: true,
+		hasCredentialSource: hasAwsCredentialSource(selectedProfile, config, credentials, new Set()),
+	};
+	cachedAwsProfileLookup = { key: cacheKey, result };
+	return result;
 }
 
 let cachedVertexAdcCredentialsExists: boolean | null = null;
@@ -105,7 +281,6 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 	const envMap: Record<string, string> = {
 		openai: "OPENAI_API_KEY",
 		"azure-openai-responses": "AZURE_OPENAI_API_KEY",
-		"prime-inference": "PRIME_API_KEY",
 		deepseek: "DEEPSEEK_API_KEY",
 		google: "GEMINI_API_KEY",
 		"google-vertex": "GOOGLE_CLOUD_API_KEY",
@@ -185,50 +360,23 @@ export function getEnvApiKey(provider: string): string | undefined {
 	}
 
 	if (provider === "amazon-bedrock") {
-		// Amazon Bedrock supports multiple credential sources:
-		// 1. AWS_PROFILE - named profile from ~/.aws/credentials
-		// 2. AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY - standard IAM keys
-		// 3. AWS_BEARER_TOKEN_BEDROCK - Bedrock bearer token
-		// 4. AWS_CONTAINER_CREDENTIALS_RELATIVE_URI - ECS task roles
-		// 5. AWS_CONTAINER_CREDENTIALS_FULL_URI - ECS task roles (full URI)
-		// 6. AWS_WEB_IDENTITY_TOKEN_FILE - IRSA (IAM Roles for Service Accounts)
+		// Amazon Bedrock supports the AWS SDK default credential chain. This
+		// synchronous check is only an availability hint; the SDK remains
+		// responsible for resolving, refreshing, and validating credentials.
+		const accessKeyId = getAwsEnvironmentValue("AWS_ACCESS_KEY_ID");
+		const secretAccessKey = getAwsEnvironmentValue("AWS_SECRET_ACCESS_KEY");
 		if (
-			process.env.AWS_PROFILE ||
-			(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) ||
-			process.env.AWS_BEARER_TOKEN_BEDROCK ||
-			process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI ||
-			process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI ||
-			process.env.AWS_WEB_IDENTITY_TOKEN_FILE ||
-			getProcEnv("AWS_PROFILE") ||
-			(getProcEnv("AWS_ACCESS_KEY_ID") && getProcEnv("AWS_SECRET_ACCESS_KEY")) ||
-			getProcEnv("AWS_BEARER_TOKEN_BEDROCK") ||
-			getProcEnv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI") ||
-			getProcEnv("AWS_CONTAINER_CREDENTIALS_FULL_URI") ||
-			getProcEnv("AWS_WEB_IDENTITY_TOKEN_FILE")
+			getAwsEnvironmentValue("AWS_PROFILE") ||
+			(accessKeyId && secretAccessKey) ||
+			getAwsEnvironmentValue("AWS_BEARER_TOKEN_BEDROCK") ||
+			getAwsEnvironmentValue("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI") ||
+			getAwsEnvironmentValue("AWS_CONTAINER_CREDENTIALS_FULL_URI") ||
+			getAwsEnvironmentValue("AWS_WEB_IDENTITY_TOKEN_FILE") ||
+			getAwsProfileConfig()?.hasCredentialSource
 		) {
 			return "<authenticated>";
 		}
 	}
 
-	return undefined;
-}
-
-// PRIME_TEAM_ID env var, falling back to team_id in ~/.prime/config.json.
-export function getPrimeTeamId(): string | undefined {
-	const fromEnv = process.env.PRIME_TEAM_ID || getProcEnv("PRIME_TEAM_ID");
-	if (fromEnv?.trim()) return fromEnv.trim();
-
-	if (!_existsSync || !_readFileSync || !_homedir || !_join) return undefined;
-	const configPath = _join(_homedir(), ".prime", "config.json");
-	if (!_existsSync(configPath)) return undefined;
-	try {
-		const parsed = JSON.parse(_readFileSync(configPath, "utf-8")) as unknown;
-		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-			const teamId = (parsed as Record<string, unknown>).team_id;
-			if (typeof teamId === "string" && teamId.trim()) return teamId.trim();
-		}
-	} catch {
-		// Unreadable/malformed config.json: behave as if no team is configured.
-	}
 	return undefined;
 }

@@ -10,12 +10,12 @@ export { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../../co
 
 import type { DaemonClientCapability, DaemonCommand, DaemonOutbound } from "./daemon-protocol.js";
 
-export const DAEMON_WORKER_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER";
-export const DAEMON_WORKER_TOKEN_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN";
-export const DAEMON_WORKER_ACTIVE_SESSION_ID_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID";
-export const DAEMON_WORKER_SUPERVISOR_SOCKET_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET";
-export const DAEMON_WORKER_RECOVERY_JOURNAL_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
-export const DAEMON_WORKER_STARTUP_GATE_FD_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_STARTUP_GATE_FD";
+export const DAEMON_WORKER_ROLE_ENV = "FULCRUM_INTERNAL_DAEMON_WORKER";
+export const DAEMON_WORKER_TOKEN_ENV = "FULCRUM_INTERNAL_DAEMON_WORKER_TOKEN";
+export const DAEMON_WORKER_ACTIVE_SESSION_ID_ENV = "FULCRUM_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID";
+export const DAEMON_WORKER_SUPERVISOR_SOCKET_ENV = "FULCRUM_INTERNAL_DAEMON_SUPERVISOR_SOCKET";
+export const DAEMON_WORKER_RECOVERY_JOURNAL_ENV = "FULCRUM_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
+export const DAEMON_WORKER_STARTUP_GATE_FD_ENV = "FULCRUM_INTERNAL_DAEMON_WORKER_STARTUP_GATE_FD";
 export const DAEMON_WORKER_STARTUP_GATE_COMMIT = "start\n";
 export type DaemonWorkerLifecycle = "starting" | "ready" | "recovering" | "failed";
 
@@ -58,6 +58,8 @@ export type DaemonWorkerCommand =
 	| { id?: string; type: "worker_unsubscribe"; activeSessionId: string }
 	| { id?: string; type: "worker_sync_agent_peers"; peers: AgentSessionMessageAgentSummary[] }
 	| { id?: string; type: "worker_archive_and_shutdown" }
+	// Older workers reject this private command; supervisors preserve the draft on that response.
+	| { id?: string; type: "worker_discard_empty_draft"; activeSessionId: string }
 	| {
 			id?: string;
 			type: "worker_passivate_idle_children";

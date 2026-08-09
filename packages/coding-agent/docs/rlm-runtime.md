@@ -1,6 +1,6 @@
 # RLM Runtime Architecture
 
-Prime Agent gives each agent session a persistent IPython kernel and a native recursive sub-agent interface. The Python `rlm` package is a model-facing shim; the TypeScript host owns child execution, persistence, usage accounting, and lifecycle.
+Fulcrum gives each agent session a persistent IPython kernel and a native recursive sub-agent interface. The Python `rlm` package is a model-facing shim; the TypeScript host owns child execution, persistence, usage accounting, and lifecycle.
 
 ## Architecture
 
@@ -9,7 +9,7 @@ flowchart TD
     session["AgentSession · TypeScript<br/>IPython tool + host request handlers"]
     manager["KernelManager · TypeScript<br/>execution + comm dispatch"]
     kernel["IPython kernel process · Python"]
-    runtime["prime-agent-runtime<br/>rlm module + Python skills"]
+    runtime["fulcrum-runtime<br/>rlm module + Python skills"]
     code["Model-executed Python code"]
 
     session -->|"owns"| manager
@@ -67,7 +67,7 @@ sequenceDiagram
 | `src/core/tools/ipython.ts` | Agent tool wrapper, lazy kernel provisioning, namespace bootstrap, and output shaping. |
 | `src/core/agent-session.ts` | RLM policy, child creation, registry, usage attribution, cancellation, and goal handlers. |
 | `src/core/rlm-runtime.ts` | Typed request/spawn-handle validation for `rlm.run`, model discovery, list, and delete. |
-| `prime-agent-runtime/src/rlm/` | Python shim, handle types, callable `rlm`, and session-backed harness state. |
+| `fulcrum-runtime/src/rlm/` | Python shim, handle types, callable `rlm`, and session-backed harness state. |
 
 The Python side does not call providers or implement an agent loop.
 
@@ -75,11 +75,11 @@ The Python side does not call providers or implement an agent loop.
 
 The kernel is created lazily on first IPython use. Python resolution is:
 
-1. `PRIME_AGENT_KERNEL_PYTHON`, when it can import `ipykernel`;
-2. `~/.prime/agent/kernel-venv/bin/python`, bootstrapped with `uv`; or
-3. the XDG data location when `~/.prime` is not writable.
+1. `FULCRUM_KERNEL_PYTHON`, when it can import `ipykernel`;
+2. `~/.fulcrum/kernel-venv/bin/python`, bootstrapped with `uv`; or
+3. the XDG data location when `~/.fulcrum` is not writable.
 
-The managed environment includes Python 3.11, `ipykernel`, and `prime-agent-runtime`. A bootstrap marker detects stale environments.
+The managed environment includes Python 3.11, `ipykernel`, and `fulcrum-runtime`. A bootstrap marker detects stale environments.
 
 Startup creates a temporary Jupyter connection file with loopback TCP ports and an HMAC key, starts `python -m ipykernel_launcher`, connects shell, IOPub, and control sockets, waits for subscription propagation, and probes readiness with `kernel_info_request`.
 
@@ -87,7 +87,7 @@ The manager owns the child process, connection directory, ZeroMQ sockets, and a 
 
 ## Jupyter Transport
 
-Prime Agent uses three channels:
+Fulcrum uses three channels:
 
 ```text
 shell    execute_request, execute_reply, kernel_info_request
@@ -124,7 +124,7 @@ The Python shim therefore registers comm handlers on the control channel, and th
 
 ## Python API
 
-`prime-agent-runtime` exports:
+`fulcrum-runtime` exports:
 
 ```python
 rlm
@@ -194,7 +194,7 @@ Registry scope follows the parent transcript. An unrelated new parent session do
 
 ## Usage and Cost Attribution
 
-The admission handle does not contain usage or completion data. Prime Agent asynchronously folds the child's assistant usage and cost into the parent assistant turn that launched it.
+The admission handle does not contain usage or completion data. Fulcrum asynchronously folds the child's assistant usage and cost into the parent assistant turn that launched it.
 
 The parent transcript persists a `child_usage_attributed` entry containing:
 
@@ -208,7 +208,7 @@ On reload, the aggregate is reapplied to the parent message. Context-tree report
 
 `rlm.harness` is a persisted state ledger for prompt notes, memories, reusable skill descriptions, sub-agent specifications, and refinement events. It is not a second execution engine.
 
-Session-local state lives in the session artifact directory under `harness/harness_state.json`. Explicitly global entries live under `~/.prime/agent/harness/`. The Python store reloads after external modification so host-side `/refine` writes and kernel writes do not overwrite each other.
+Session-local state lives in the session artifact directory under `harness/harness_state.json`. Explicitly global entries live under `~/.fulcrum/harness/`. The Python store reloads after external modification so host-side `/refine` writes and kernel writes do not overwrite each other.
 
 `/refine` runs a dedicated review over the current trajectory and applies small create/update/delete edits. Rollback uses recorded before/after snapshots. The base system prompt remains immutable; refinements are supplemental state.
 
@@ -229,7 +229,7 @@ Goal state, persistence, token and wall-clock accounting, and continuation promp
 For a persisted root session, the relevant layout is:
 
 ```text
-~/.prime/agent/
+~/.fulcrum/
   sessions/
     <root-session-id>.jsonl
   session-artifacts/

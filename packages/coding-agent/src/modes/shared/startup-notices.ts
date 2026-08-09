@@ -14,7 +14,7 @@ import { checkForNewPiVersion } from "../../utils/version-check.js";
 import { theme } from "../interactive/theme/theme.js";
 
 export interface StartupNotices {
-	/** Newer Prime Agent version available, if any. */
+	/** Newer Fulcrum version available, if any. */
 	newVersion?: string;
 	/** Display names of extensions with available updates. */
 	packageUpdates: string[];
@@ -44,7 +44,7 @@ export async function checkForPackageUpdates(options: {
 	agentDir: string;
 	settingsManager: SettingsManager;
 }): Promise<string[]> {
-	if (process.env.PI_OFFLINE) {
+	if (process.env.FULCRUM_OFFLINE) {
 		return [];
 	}
 
@@ -102,7 +102,7 @@ export async function checkTmuxKeyboardSetup(): Promise<string | undefined> {
 	}
 
 	if (extendedKeysFormat === "xterm") {
-		return "tmux extended-keys-format is xterm. Pi works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
+		return "tmux extended-keys-format is xterm. Fulcrum works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
 	}
 
 	return undefined;

@@ -21,14 +21,14 @@ if (!sourceSession) {
 	process.exit(1);
 }
 
-const agentDir = mkdtempSync(join(tmpdir(), "pi-attach-bench-"));
+const agentDir = mkdtempSync(join(tmpdir(), "fulcrum-attach-bench-"));
 const socketPath = join(agentDir, "daemon.sock");
 const sessionPath = join(agentDir, basename(sourceSession));
 copyFileSync(sourceSession, sessionPath);
 
 const daemon = spawn(process.execPath, [entrypoint, "--mode", "daemon", "--daemon-socket", socketPath], {
 	stdio: "ignore",
-	env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" },
+	env: { ...process.env, FULCRUM_CODING_AGENT_DIR: agentDir, FULCRUM_OFFLINE: "1", FULCRUM_SKIP_VERSION_CHECK: "1" },
 });
 
 function request(socket, command) {

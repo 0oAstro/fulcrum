@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { basename, dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
 
-export const SESSION_LEASES_ENABLED_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASES";
-export const SESSION_LEASE_OWNER_ID_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID";
+export const SESSION_LEASES_ENABLED_ENV = "FULCRUM_INTERNAL_SESSION_LEASES";
+export const SESSION_LEASE_OWNER_ID_ENV = "FULCRUM_INTERNAL_SESSION_LEASE_OWNER_ID";
 
 interface SessionLeaseOwner {
 	version: 1;
@@ -81,6 +81,16 @@ export function canonicalSessionPath(sessionPath: string): string {
 			return resolvedPath;
 		}
 	}
+}
+
+/** Returns true when a live lease owns the session, or when a malformed lease should be preserved. */
+export function hasActiveSessionLease(sessionPath: string, agentDir: string): boolean {
+	const directory = leaseDirectory(agentDir, canonicalSessionPath(sessionPath));
+	if (!existsSync(directory)) {
+		return false;
+	}
+	const owner = readLeaseOwner(directory);
+	return owner === undefined || isLeaseOwnerAlive(owner);
 }
 
 function readLeaseOwner(directory: string): SessionLeaseOwner | undefined {

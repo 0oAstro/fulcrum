@@ -26,11 +26,6 @@
 	],
 	"author": "Mario Zechner",
 	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/PrimeIntellect-ai/prime-agent.git",
-		"directory": "packages/tui"
-	},
 	"engines": {
 		"node": ">=20.0.0"
 	},

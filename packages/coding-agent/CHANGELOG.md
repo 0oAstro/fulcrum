@@ -2,9 +2,24 @@
 
 ## [Unreleased]
 
-- Added privacy-safe pseudonymous product analytics for onboarding, command use, execution modes, run outcomes, TTFT, latency, usage, tools, retries, and compactions, with disclosure and opt-out controls ([ENG-4682](https://linear.app/primeintellect/issue/ENG-4682/add-privacy-safe-posthog-analytics-to-prime-agent)).
+- Fixed Amazon Bedrock model discovery and switching when credentials come from shared AWS profiles.
+- Fixed bookkeeping-only daemon drafts remaining after their last client disconnects or crash recovery.
+- Added Ctrl+P and Ctrl+Shift+P model cycling plus Shift+Tab reasoning-level cycling.
+- Removed implicit `.agents/skills` discovery; Fulcrum now auto-loads user and project skills only from its `.fulcrum/skills` directories.
+- Added compact Firecrawl search and browser output with optional cheap-model extraction through `browser.fetch`.
+- Added `websearch.research` for concurrent multi-query research, authoritative-source extraction, and cited cheap-model synthesis with a deterministic fallback.
+- Consolidated web discovery, page opening, site mapping, and research under the first-party `websearch` Python module while retaining `browser.fetch` for focused extraction.
+- Added explicit `websearch.researchModel` configuration and improved research recall for official academic documents and PDFs without adding search calls.
+- Improved research synthesis of present-day ages, durations, and statuses from dated evidence without inventing precision.
+- Added one bounded adaptive research round that inspects cleaned initial evidence, targets unresolved constraints, and calibrates exact answers against direct cited extracts.
+- Improved research recall with concise anchor-preserving query planning, narrower PDF filtering, domain-diverse sources, and distinct search-failure diagnostics.
+- Improved adaptive research reliability by serializing page scrapes and limiting generated queries to one quoted phrase.
+- Added a background personal-WhatsApp gateway with per-chat sessions, media transfer, latest-message interruption, and configurable conversation rotation.
+- Added first-party pre-imported `websearch` and `browser` Python modules backed by host-side Firecrawl service credentials.
+- Changed the application name, command, runtime package, and default configuration directory to Fulcrum, `fulcrum`, `fulcrum-runtime`, and `~/.fulcrum`.
 - Changed sent agent messages in the IPython cell UI to show only the message text with a `╰─` gutter when expanded, matching received messages, and hid the raw `agent_message.send` receipt dictionary.
-- Fixed Homebrew installs attempting to self-update their versioned Cellar keg instead of directing users to `brew upgrade prime-agent` ([#844](https://github.com/PrimeIntellect-ai/prime-agent/issues/844))
+- Removed Prime Inference, Prime Intellect skills, agent trace uploads, and product telemetry.
+- Fixed Homebrew installs attempting to self-update their versioned Cellar keg instead of directing users to `brew upgrade fulcrum`.
 
 ## [0.7.1] - 2026-08-07
 

@@ -11,6 +11,7 @@ import {
 	getCronJobsPath,
 	getDaemonLogPath,
 	getDaemonUpdateRestartManifestPath,
+	getSessionsDir,
 	VERSION,
 } from "../../config.js";
 import {
@@ -40,8 +41,16 @@ import {
 	type IdleEvictionMinutes,
 	type WorkerEvictionSnapshot,
 } from "../../core/session-action-store.js";
-import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
-import { readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
+import { deleteSessionFile } from "../../core/session-file-actions.js";
+import {
+	acquireSessionLease,
+	canonicalSessionPath,
+	getProcessStartId,
+	hasActiveSessionLease,
+	SessionAlreadyActiveError,
+	type SessionLease,
+} from "../../core/session-lease.js";
+import { isDiscardableSessionDraftFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { signalProcessGroupOrProcess } from "../../utils/child-process.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
@@ -127,6 +136,8 @@ type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
 const structuredLog = getLogger("coding-agent.daemon-supervisor");
 const WORKER_CONNECT_TIMEOUT_MS = 30_000;
 const WORKER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+// Older workers can leave an unknown private command unanswered; never pin the lifecycle fence.
+const DETACHED_DRAFT_DISCARD_REQUEST_TIMEOUT_MS = 10_000;
 const UPDATE_RESTART_MUTATION_DRAIN_TIMEOUT_MS = 80_000;
 const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
 // The whole pre-commit prepare (drain + worker fencing) must finish inside the
@@ -500,7 +511,7 @@ export function idleEvictionSweepIntervalMs(idleEvictionMinutes: IdleEvictionMin
 function workerSocketPath(supervisorSocketPath: string, workerId: string): string {
 	const key = descriptorKey(supervisorSocketPath);
 	if (process.platform === "win32") {
-		return `\\\\.\\pipe\\prime-agent-worker-${key}-${workerId.slice(0, 12)}`;
+		return `\\\\.\\pipe\\fulcrum-worker-${key}-${workerId.slice(0, 12)}`;
 	}
 	return join(defaultDaemonSocketDir(), `worker-${key}-${workerId.slice(0, 12)}.sock`);
 }
@@ -611,6 +622,8 @@ export class DaemonSupervisor {
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
 	private idleEvictionFence?: Promise<void>;
+	private detachedDraftCleanupFence?: Promise<void>;
+	private readonly detachedDraftCleanupWorkers = new Map<string, symbol>();
 
 	constructor(
 		private readonly socketPath: string,
@@ -699,13 +712,14 @@ export class DaemonSupervisor {
 			if (adoptionFailed) {
 				throw adoptionFailure;
 			}
+			await this.reapOrphanedEmptyDrafts();
 			await this.syncAgentPeers().catch((error) => this.log(`Could not synchronize agent peers: ${String(error)}`));
 			for (const worker of this.workers.values()) {
 				this.scheduleOwnedWorkerCleanup(worker);
 			}
 			this.scheduleIdleEvictionSweep();
 			await this.ownership.updatePhase("owner");
-			this.log(`Prime Agent daemon supervisor ${this.generation} listening on ${this.socketPath}`);
+			this.log(`Fulcrum daemon supervisor ${this.generation} listening on ${this.socketPath}`);
 			this.markReady();
 		} catch (error) {
 			const startupError = error instanceof Error ? error : new Error(String(error));
@@ -738,10 +752,222 @@ export class DaemonSupervisor {
 		appendRotatingLog(getDaemonLogPath(this.socketPath), `[${new Date().toISOString()}] supervisor: ${message}`);
 	}
 
+	private activeSessionFilePaths(): Set<string> {
+		return new Set(
+			[...this.workers.values()]
+				.flatMap((worker) => [
+					worker.descriptor.sessionFile,
+					worker.descriptor.createCommand.sessionPath,
+					...[...worker.summaries.values()].map((summary) => summary.sessionFile),
+				])
+				.filter((path): path is string => typeof path === "string")
+				.map((path) => canonicalSessionPath(path)),
+		);
+	}
+
+	private async hasDurableScheduledJobs(sessionFile: string): Promise<boolean> {
+		try {
+			const info = await readSessionInfo(sessionFile);
+			if (!info) return true;
+			const jobs = AgentCronJobStore.forSessionArtifacts();
+			jobs.registerSessionArtifact(
+				info.id,
+				join(dirname(dirname(resolve(sessionFile))), "session-artifacts", info.id),
+			);
+			return jobs.list().some((job) => job.status !== "cancelled" && job.status !== "completed");
+		} catch (error) {
+			this.log(`Preserving draft with unreadable scheduled jobs ${sessionFile}: ${String(error)}`);
+			return true;
+		}
+	}
+
+	private async reapOrphanedEmptyDrafts(): Promise<void> {
+		const agentDir = this.defaultSessionConfig.agentDir;
+		if (!agentDir) return;
+		const sessionDir = resolve(this.defaultSessionConfig.sessionDir ?? getSessionsDir(agentDir));
+		let names: string[];
+		try {
+			names = readdirSync(sessionDir);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				this.log(`Could not scan session drafts in ${sessionDir}: ${String(error)}`);
+			}
+			return;
+		}
+		const activeSessionFiles = this.activeSessionFilePaths();
+		for (const name of names) {
+			if (!name.endsWith(".jsonl")) continue;
+			const sessionFile = join(sessionDir, name);
+			const canonicalPath = canonicalSessionPath(sessionFile);
+			if (activeSessionFiles.has(canonicalPath) || hasActiveSessionLease(sessionFile, agentDir)) continue;
+			if (!(await isDiscardableSessionDraftFile(sessionFile))) continue;
+
+			let cleanupLease: SessionLease | undefined;
+			try {
+				cleanupLease = acquireSessionLease(sessionFile, agentDir, {
+					...process.env,
+					[SESSION_LEASES_ENABLED_ENV]: "1",
+				});
+			} catch (error) {
+				if (!(error instanceof SessionAlreadyActiveError)) {
+					this.log(`Could not lease orphaned draft ${sessionFile}: ${String(error)}`);
+				}
+				continue;
+			}
+			if (!cleanupLease) continue;
+			try {
+				const info = await readSessionInfo(sessionFile);
+				if (
+					!info ||
+					activeSessionFiles.has(canonicalPath) ||
+					(await this.hasDurableScheduledJobs(sessionFile)) ||
+					!(await isDiscardableSessionDraftFile(sessionFile))
+				) {
+					continue;
+				}
+				const result = await deleteSessionFile(sessionFile, { artifactSessionId: info.id });
+				if (result.ok) {
+					this.log(`Reaped orphaned empty session draft ${sessionFile}`);
+				} else {
+					this.log(`Could not reap orphaned empty session draft ${sessionFile}: ${result.error}`);
+				}
+			} finally {
+				cleanupLease.release();
+			}
+		}
+	}
+
 	private clearIdleEvictionTimer(): void {
 		if (!this.idleEvictionTimer) return;
 		clearTimeout(this.idleEvictionTimer);
 		this.idleEvictionTimer = undefined;
+	}
+
+	private scheduleDetachedDraftWorkerCleanup(worker: ResidentWorker): void {
+		const workerId = worker.descriptor.workerId;
+		if (worker.descriptor.ownerClientId || this.detachedDraftCleanupWorkers.has(workerId)) return;
+		const token = Symbol("detached-draft-cleanup");
+		this.detachedDraftCleanupWorkers.set(workerId, token);
+		setImmediate(() => {
+			void this.stopDetachedDraftWorker(worker, token).finally(() => {
+				if (this.detachedDraftCleanupWorkers.get(workerId) === token) {
+					this.detachedDraftCleanupWorkers.delete(workerId);
+				}
+			});
+		});
+	}
+
+	private cancelDetachedDraftWorkerCleanup(worker: ResidentWorker): void {
+		this.detachedDraftCleanupWorkers.delete(worker.descriptor.workerId);
+	}
+
+	private async waitForDetachedDraftCleanupFence(): Promise<void> {
+		while (this.detachedDraftCleanupFence) {
+			await this.detachedDraftCleanupFence;
+		}
+	}
+
+	private async withDetachedDraftCleanupFence<T>(action: () => Promise<T>): Promise<T> {
+		await this.waitForDetachedDraftCleanupFence();
+		while (this.idleEvictionFence) {
+			await this.idleEvictionFence;
+		}
+		let release!: () => void;
+		const fence = new Promise<void>((resolveFence) => {
+			release = resolveFence;
+		});
+		this.detachedDraftCleanupFence = fence;
+		this.idleEvictionFence = fence;
+		try {
+			return await action();
+		} finally {
+			if (this.detachedDraftCleanupFence === fence) {
+				this.detachedDraftCleanupFence = undefined;
+			}
+			if (this.idleEvictionFence === fence) {
+				this.idleEvictionFence = undefined;
+			}
+			release();
+		}
+	}
+
+	private isDetachedDraftWorker(worker: ResidentWorker, token: symbol): boolean {
+		if (this.detachedDraftCleanupWorkers.get(worker.descriptor.workerId) !== token) return false;
+		if (
+			this.shuttingDown ||
+			this.updateRestartPhase !== undefined ||
+			this.workers.get(worker.descriptor.workerId) !== worker ||
+			worker.descriptor.ownerClientId !== undefined ||
+			worker.intentionalStop ||
+			worker.descriptor.stopRequestedAt !== undefined ||
+			!worker.client ||
+			worker.summaries.size !== 1
+		) {
+			return false;
+		}
+		const root = worker.summaries.get(worker.descriptor.rootActiveSessionId);
+		if (
+			!root ||
+			root.messageCount !== 0 ||
+			isSessionSummaryBusy(root) ||
+			root.hasRegisteredCronJob === true ||
+			root.hasRegisteredHeartbeat === true
+		) {
+			return false;
+		}
+		const rootActiveSessionId = root.activeSessionId ?? root.id;
+		return ![...this.clients].some((client) => client.attachedActiveSessionIds.has(rootActiveSessionId));
+	}
+
+	private async stopDetachedDraftWorker(worker: ResidentWorker, token: symbol): Promise<void> {
+		try {
+			if (!this.isDetachedDraftWorker(worker, token)) return;
+			await this.refreshWorkerSummaries(worker);
+			if (!this.isDetachedDraftWorker(worker, token)) return;
+			const root = worker.summaries.get(worker.descriptor.rootActiveSessionId);
+			if (
+				!root?.sessionFile ||
+				(await this.hasDurableScheduledJobs(root.sessionFile)) ||
+				!(await isDiscardableSessionDraftFile(root.sessionFile))
+			) {
+				return;
+			}
+			await this.withDetachedDraftCleanupFence(async () => {
+				if (!this.isDetachedDraftWorker(worker, token)) return;
+				await this.mutationDrain.waitForDrain(
+					0,
+					AbortSignal.timeout(IDLE_EVICTION_DRAIN_TIMEOUT_MS),
+					"Timed out draining daemon mutations for detached draft cleanup",
+				);
+				if (!this.isDetachedDraftWorker(worker, token)) return;
+				await this.refreshWorkerSummaries(worker);
+				const currentRoot = worker.summaries.get(worker.descriptor.rootActiveSessionId);
+				if (
+					!currentRoot?.sessionFile ||
+					(await this.hasDurableScheduledJobs(currentRoot.sessionFile)) ||
+					!(await isDiscardableSessionDraftFile(currentRoot.sessionFile)) ||
+					!this.isDetachedDraftWorker(worker, token) ||
+					!worker.client
+				) {
+					return;
+				}
+				const response = await worker.client.requestWorker(
+					{ type: "worker_discard_empty_draft", activeSessionId: currentRoot.activeSessionId ?? currentRoot.id },
+					DETACHED_DRAFT_DISCARD_REQUEST_TIMEOUT_MS,
+				);
+				if (
+					!response.success ||
+					typeof response.data !== "object" ||
+					response.data === null ||
+					(response.data as { discarded?: unknown }).discarded !== true
+				) {
+					return;
+				}
+				await this.stopWorker(worker, true);
+			});
+		} catch (error) {
+			this.log(`Could not stop detached empty draft worker ${worker.descriptor.workerId}: ${String(error)}`);
+		}
 	}
 
 	private scheduleIdleEvictionSweep(): void {
@@ -830,7 +1056,7 @@ export class DaemonSupervisor {
 					}
 				}),
 		);
-		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
+		if (this.shuttingDown || this.updateRestartPhase !== undefined || this.idleEvictionFence) return;
 
 		let releaseFence: () => void = () => {};
 		const fence = new Promise<void>((resolveFence) => {
@@ -1049,10 +1275,14 @@ export class DaemonSupervisor {
 			client.detachInput();
 			this.clients.delete(client);
 			this.cancelWaitingPromptAdmissionsForClient(client);
+			const detachedWorkers = new Set<ResidentWorker>();
 			for (const activeSessionId of [...client.attachedActiveSessionIds]) {
+				const match = this.matchWorkers(activeSessionId)[0];
+				if (match) detachedWorkers.add(match.worker);
 				client.attachedActiveSessionIds.delete(activeSessionId);
 				void this.syncWorkerExtensionUi(activeSessionId);
 			}
+			for (const worker of detachedWorkers) this.scheduleDetachedDraftWorkerCleanup(worker);
 			this.scheduleOwnedWorkerCleanupForClient(this.protocolClientId(client));
 		};
 		socket.on("close", cleanup);
@@ -3263,7 +3493,6 @@ export class DaemonSupervisor {
 			if (ownedWorker.descriptor.ownerClientId !== this.protocolClientId(client)) {
 				throw new Error(`Unknown active session: ${command.activeSessionId}`);
 			}
-			this.assertTelemetryAttachAllowed(ownedWorker, command.telemetryDisabled);
 			ownedWorker.launchEnv = command.launchEnv ?? ownedWorker.launchEnv;
 			if (!ownedWorker.client || ownedWorker.descriptor.lifecycle !== "ready") {
 				if (!ownedWorker.launchEnv) {
@@ -3278,8 +3507,11 @@ export class DaemonSupervisor {
 				await this.recoverWorker(ownedWorker);
 			}
 		}
-		const match = await this.findWorkerForClient(client, command.activeSessionId);
-		this.assertTelemetryAttachAllowed(match.worker, command.telemetryDisabled);
+		let match = await this.findWorkerForClient(client, command.activeSessionId);
+		this.cancelDetachedDraftWorkerCleanup(match.worker);
+		await this.waitForDetachedDraftCleanupFence();
+		match = await this.findWorkerForClient(client, command.activeSessionId);
+		this.cancelDetachedDraftWorkerCleanup(match.worker);
 		const activeSessionId = match.summary.activeSessionId ?? match.summary.id;
 		const duplicateValidation = this.currentSnapshotGeneration(match.worker, activeSessionId)?.validation;
 		if (duplicateValidation) {
@@ -3423,14 +3655,6 @@ export class DaemonSupervisor {
 				client.attachedActiveSessionIds.delete(activeSessionId);
 			}
 			throw error;
-		}
-	}
-
-	private assertTelemetryAttachAllowed(worker: ResidentWorker, telemetryDisabled: true | undefined): void {
-		if (telemetryDisabled && worker.descriptor.createCommand.config?.telemetryDisabled !== true) {
-			throw new Error(
-				"Cannot attach to this active agent while telemetry is disabled for the current invocation. Stop the agent and retry so it can restart without telemetry.",
-			);
 		}
 	}
 
@@ -3710,6 +3934,7 @@ export class DaemonSupervisor {
 			client.catchupPurposes?.delete(resolvedId);
 			this.write(client, { type: "session_detached", activeSessionId: resolvedId });
 			void this.syncWorkerExtensionUi(resolvedId);
+			if (match) this.scheduleDetachedDraftWorkerCleanup(match.worker);
 		}
 	}
 
@@ -4133,7 +4358,10 @@ export class DaemonSupervisor {
 			sessionEventType === "rlm_child_update"
 		) {
 			void this.refreshWorkerSummaries(worker)
-				.then(() => this.syncAgentPeers())
+				.then(() => {
+					void this.syncAgentPeers();
+					this.scheduleDetachedDraftWorkerCleanup(worker);
+				})
 				.catch(() => undefined);
 		}
 		if (

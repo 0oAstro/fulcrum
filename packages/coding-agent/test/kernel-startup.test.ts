@@ -13,7 +13,7 @@ function writeExecutable(filePath: string, content: string): void {
 
 describe("KernelManager startup", () => {
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "prime-agent-kernel-startup-"));
+		tempDir = mkdtempSync(join(tmpdir(), "fulcrum-kernel-startup-"));
 	});
 
 	afterEach(() => {

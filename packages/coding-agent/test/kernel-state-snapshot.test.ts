@@ -11,11 +11,11 @@ import {
 } from "../src/core/kernel/state-snapshot.js";
 
 // Kept in sync with the marker the Python helpers print.
-const MARKER = "__PRIME_AGENT_KERNEL_STATE__";
+const MARKER = "__FULCRUM_KERNEL_STATE__";
 
 describe("kernel state snapshot paths", () => {
 	it("places snapshot + manifest inside the session artifact directory", () => {
-		const artifactDir = "/home/u/.prime/agent/session-artifacts/abc-123";
+		const artifactDir = "/home/u/.fulcrum/session-artifacts/abc-123";
 		expect(snapshotPathIn(artifactDir)).toBe(join(artifactDir, "kernel-state.dill"));
 		expect(manifestPathIn(artifactDir)).toBe(join(artifactDir, "kernel-state.json"));
 	});
@@ -95,8 +95,10 @@ describe("buildSnapshotCode", () => {
 	it("uses dill, an atomic write, and skips internal handles", () => {
 		expect(code).toContain("import dill");
 		expect(code).toContain("os.replace");
-		// rlm and the IPython display names must never be serialized.
+		// Bootstrap-provided modules and IPython display names must never be serialized.
 		expect(code).toContain('"rlm"');
+		expect(code).toContain('"websearch"');
+		expect(code).toContain('"browser"');
 		expect(code).toContain(`print(${JSON.stringify(MARKER)}`);
 	});
 });

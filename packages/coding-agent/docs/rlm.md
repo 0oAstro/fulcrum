@@ -1,6 +1,6 @@
 # RLM Programming Model
 
-Prime Agent is built around a recursive language model (RLM) runtime: the model works inside a persistent Python control environment and composes capabilities as code. Provider calls, session persistence, child lifecycles, scheduling, and safety policy remain in the TypeScript host; IPython is the model-facing programming surface.
+Fulcrum is built around a recursive language model (RLM) runtime: the model works inside a persistent Python control environment and composes capabilities as code. Provider calls, session persistence, child lifecycles, scheduling, and safety policy remain in the TypeScript host; IPython is the model-facing programming surface.
 
 ## RLM Loop
 
@@ -48,7 +48,9 @@ Run a project's normal commands through its own environment from an IPython cell
 npm run check
 ```
 
-Each `%%bash` cell is a temporary subshell, while Python state and `%cd` changes persist in the kernel. Prime Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
+Each `%%bash` cell is a temporary subshell, while Python state and `%cd` changes persist in the kernel. Fulcrum extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
+
+The first-party `websearch` module is the single web API: `search(...)` performs one compact lookup, `open(...)` reads a page, `map(...)` discovers site links, and `research(topic, queries=None, max_queries=4, follow_up_queries=2, results_per_query=5, max_sources=8, instruction=None, include_domains=None, exclude_domains=None, recency=None)` plans orthogonal queries, searches concurrently, selects and cleans initial page evidence, then lets the configured research model run at most one adaptive round of up to `follow_up_queries` queries for unresolved constraints, candidate verification, or missing primary records; set it to `0` to disable the adaptive round. Document-oriented queries use PDF-category discovery. Final synthesis labels whether an exact answer has direct extract support and otherwise returns a calibrated insufficient-evidence result or deterministic matrix. The host supplies the current date to planning, evidence assessment, and synthesis; when evidence reports a dated age, duration, or status, synthesis derives only the present-day value or range justified by the available date fields and states its calculation, assumptions, and uncertainty. Default to `search` for factual lookups: research adds several searches and page scrapes, and is useful mainly for contested, high-stakes, or genuinely multi-source questions. Pass explicit orthogonal `queries` when the useful axes are already known. Fulcrum never substitutes a different research model: if the setting is absent, unavailable, or unauthenticated, no adaptive query is generated, explicit queries still run, and the result is a deterministic evidence matrix; without explicit queries, research searches the topic once before scraping. `browser.fetch(...)` remains a focused cheap-model page extractor and continues selecting the cheapest executable text model independently.
 
 ### 2. Subagents are native RLM calls
 
@@ -107,7 +109,7 @@ The default recursion depth allows a root agent to create children. Raising the 
 
 ### 3. Skills add programmatic capability
 
-Prime Agent supports the Agent Skills markdown format and extends it with Python-backed skills. Both use `SKILL.md` for discovery, routing, and instructions. A Python-backed skill also contains a Python package that Prime Agent installs into the kernel environment and exposes by import name.
+Fulcrum supports the Agent Skills markdown format and extends it with Python-backed skills. Both use `SKILL.md` for discovery, routing, and instructions. A Python-backed skill also contains a Python package that Fulcrum installs into the kernel environment and exposes by import name.
 
 For a skill named `release-audit`, the model can call:
 

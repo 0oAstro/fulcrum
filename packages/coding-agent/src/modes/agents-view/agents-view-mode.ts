@@ -332,7 +332,6 @@ async function openAgentsViewSession(
 				closeClientOnDispose: true,
 				recoverDaemon: options.recoverDaemon,
 				reconnectTimeoutMs: options.reconnectTimeoutMs,
-				telemetryDisabled: options.config.telemetryDisabled,
 			});
 			return { connection, summary };
 		} catch (error) {
@@ -355,7 +354,6 @@ async function openAgentsViewSession(
 			closeClientOnDispose: true,
 			recoverDaemon: options.recoverDaemon,
 			reconnectTimeoutMs: options.reconnectTimeoutMs,
-			telemetryDisabled: options.config.telemetryDisabled,
 		});
 		return { connection, summary: resumed.summary, cwdFallbackNotice: resumed.cwdFallbackNotice };
 	} catch (error) {
@@ -2093,22 +2091,6 @@ export class AgentsViewMode implements Component, Focusable {
 		message: string,
 		streamingBehavior?: "steer" | "followUp",
 	): Promise<void> {
-		if (this.options.config.telemetryDisabled) {
-			const client = await this.connectDedicatedClient();
-			const connection = await DaemonAgentConnection.attach(client, activeSessionId, {
-				closeClientOnDispose: true,
-				supportsExtensionUi: false,
-				recoverDaemon: this.options.recoverDaemon,
-				reconnectTimeoutMs: this.options.reconnectTimeoutMs,
-				telemetryDisabled: true,
-			});
-			try {
-				await connection.prompt(message, streamingBehavior === undefined ? undefined : { streamingBehavior });
-			} finally {
-				await connection.dispose();
-			}
-			return;
-		}
 		const command: PromptCommand = { type: "prompt", activeSessionId, message };
 		if (streamingBehavior) command.streamingBehavior = streamingBehavior;
 		const response = await this.requireClient().request(command);
@@ -2420,7 +2402,7 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		this.daemonShutdownReceived = true;
 		this.reconnectTimedOut = false;
-		this.setStatusMessage(`Prime Agent daemon shut down. Restart Prime Agent to reconnect. ${error.message}`, {
+		this.setStatusMessage(`Fulcrum daemon shut down. Restart Fulcrum to reconnect. ${error.message}`, {
 			tone: "error",
 			sticky: true,
 		});

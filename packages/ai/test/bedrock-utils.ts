@@ -1,18 +1,15 @@
-/**
- * Utility functions for Amazon Bedrock tests
- */
+import { getAwsProfileConfig } from "../src/env-api-keys.js";
 
 /**
- * Check if any valid AWS credentials are configured for Bedrock.
- * Returns true if any of the following are set:
- * - AWS_PROFILE (named profile from ~/.aws/credentials)
- * - AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (IAM keys)
- * - AWS_BEARER_TOKEN_BEDROCK (Bedrock API key)
+ * Check if any valid AWS credential source is configured for Bedrock.
+ * This is an availability hint; the AWS SDK validates and refreshes the
+ * source when a request is sent.
  */
 export function hasBedrockCredentials(): boolean {
 	return !!(
 		process.env.AWS_PROFILE ||
 		(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) ||
-		process.env.AWS_BEARER_TOKEN_BEDROCK
+		process.env.AWS_BEARER_TOKEN_BEDROCK ||
+		getAwsProfileConfig()?.hasCredentialSource
 	);
 }

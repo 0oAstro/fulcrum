@@ -85,10 +85,10 @@ export function migrateAuthToAuthJson(): string[] {
 }
 
 /**
- * Migrate sessions from ~/.pi/agent/*.jsonl to the session root.
+ * Migrate sessions from ~/.fulcrum/*.jsonl to the session root.
  *
- * Bug in v0.30.0: Sessions were saved to ~/.pi/agent/ instead of
- * ~/.pi/agent/sessions/. This migration moves them to the configured
+ * A previous version saved sessions to ~/.fulcrum/ instead of
+ * ~/.fulcrum/sessions/. This migration moves them to the configured
  * session root.
  *
  * See: https://github.com/earendil-works/pi-mono/issues/320
@@ -156,7 +156,7 @@ function isLegacySessionDirName(name: string): boolean {
 /**
  * Migrate legacy per-cwd session directories into the flat session root.
  *
- * Older versions stored sessions under ~/.prime/agent/sessions/--cwd--/*.jsonl.
+ * Older versions stored sessions under ~/.fulcrum/sessions/--cwd--/*.jsonl.
  * The daemon list/continue paths now scan the flat session root, so move any
  * existing nested JSONL session files up one level.
  */

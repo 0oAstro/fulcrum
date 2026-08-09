@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -44,6 +44,45 @@ describe("builtin skills", () => {
 	});
 
 	describe("DefaultPackageManager", () => {
+		it("loads Fulcrum user skills but excludes implicitly linked Hermes skills", async () => {
+			const previousHome = process.env.HOME;
+			const homeDir = join(tempDir, "home");
+			const fulcrumDir = join(homeDir, ".fulcrum");
+			const hermesSkillsDir = join(homeDir, ".hermes", "skills");
+			const agentsDir = join(homeDir, ".agents");
+			writeSkill(join(fulcrumDir, "skills"), "fulcrum-user-skill");
+			writeSkill(hermesSkillsDir, "hermes-skill");
+			mkdirSync(agentsDir, { recursive: true });
+			symlinkSync(hermesSkillsDir, join(agentsDir, "skills"), "dir");
+			process.env.HOME = homeDir;
+
+			try {
+				const packageManager = new DefaultPackageManager({
+					cwd,
+					agentDir: fulcrumDir,
+					settingsManager,
+					bundledSkillsDir: null,
+				});
+				const result = await packageManager.resolve();
+				const paths = result.skills.map((skill) => skill.path);
+
+				expect(paths).toContain(join(fulcrumDir, "skills", "fulcrum-user-skill", "SKILL.md"));
+				expect(paths).not.toContain(join(hermesSkillsDir, "hermes-skill", "SKILL.md"));
+
+				const explicitLoader = new DefaultResourceLoader({
+					cwd,
+					agentDir: fulcrumDir,
+					bundledSkillsDir: null,
+					additionalSkillPaths: [join(hermesSkillsDir, "hermes-skill")],
+				});
+				await explicitLoader.reload();
+				expect(explicitLoader.getSkills().skills.map((skill) => skill.name)).toContain("hermes-skill");
+			} finally {
+				if (previousHome === undefined) delete process.env.HOME;
+				else process.env.HOME = previousHome;
+			}
+		});
+
 		it("resolves bundled skills with builtin source at lowest precedence", async () => {
 			writeSkill(bundledDir, "builtin-skill");
 
@@ -223,7 +262,6 @@ describe("builtin skills", () => {
 
 			expect(diagnostics).toEqual([]);
 			expect(skills.length).toBeGreaterThan(0);
-			expect(skills.map((s) => s.name)).toContain("prime-intellect");
 			expect(skills.map((s) => s.name)).toContain("skill-creator");
 		});
 
@@ -318,7 +356,7 @@ describe("builtin skills", () => {
 		});
 
 		it("release packer includes skills in the packed package", () => {
-			const script = readFileSync(join(repoRoot, "scripts", "pack-prime-agent-release.mjs"), "utf-8");
+			const script = readFileSync(join(repoRoot, "scripts", "pack-fulcrum-release.mjs"), "utf-8");
 			expect(script).toContain('"skills"');
 		});
 	});

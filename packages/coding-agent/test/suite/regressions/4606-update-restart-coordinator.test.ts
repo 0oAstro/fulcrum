@@ -31,7 +31,7 @@ const fauxExtensionPath = resolve(__dirname, "../../fixtures/eng-4600-faux-exten
 const launcherFixturePath = resolve(__dirname, "../../fixtures/eng-4606-update-launcher.ts");
 const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
 const tsconfigPath = resolve(__dirname, "../../../../../tsconfig.json");
-const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+const supervisorRegistryDirEnv = "FULCRUM_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 const supervisors = new Set<SupervisorHandle>();
 const harnesses: Harness[] = [];
 const sockets = new Set<string>();
@@ -431,7 +431,7 @@ describe("ENG-4606 update restart coordinator", () => {
 		expect(await connection.getMessages()).toContainEqual(
 			expect.objectContaining({
 				role: "custom",
-				customType: "prime-agent.update_complete",
+				customType: "fulcrum.update_complete",
 				display: true,
 			}),
 		);

@@ -116,6 +116,66 @@ describe("CustomEditor", () => {
 		expect(editor.getText()).toBe("Can this contain?");
 	});
 
+	it("routes model and thinking cycle shortcuts", () => {
+		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
+		const nextModel = vi.fn();
+		const previousModel = vi.fn();
+		const cycleThinking = vi.fn();
+		editor.onAction("app.model.cycleForward", nextModel);
+		editor.onAction("app.model.cycleBackward", previousModel);
+		editor.onAction("app.thinking.cycle", cycleThinking);
+
+		editor.handleInput("\x10");
+		editor.handleInput("\x1b[112;6u");
+		editor.handleInput("P");
+		editor.handleInput("\x1b[Z");
+
+		expect(nextModel).toHaveBeenCalledOnce();
+		expect(previousModel).toHaveBeenCalledOnce();
+		expect(cycleThinking).toHaveBeenCalledOnce();
+		expect(editor.getText()).toBe("P");
+	});
+
+	it("honors remapped and disabled model and thinking cycle shortcuts", () => {
+		const keybindings = new KeybindingsManager({
+			"app.model.cycleForward": "ctrl+x",
+			"app.model.cycleBackward": "ctrl+y",
+			"app.thinking.cycle": "ctrl+g",
+		});
+		const editor = new CustomEditor(fakeTui, editorTheme, keybindings);
+		const nextModel = vi.fn();
+		const previousModel = vi.fn();
+		const cycleThinking = vi.fn();
+		editor.onAction("app.model.cycleForward", nextModel);
+		editor.onAction("app.model.cycleBackward", previousModel);
+		editor.onAction("app.thinking.cycle", cycleThinking);
+
+		editor.handleInput("\x10");
+		editor.handleInput("P");
+		editor.handleInput("\x1b[Z");
+		editor.handleInput("\x18");
+		editor.handleInput("\x19");
+		editor.handleInput("\x07");
+
+		expect(nextModel).toHaveBeenCalledOnce();
+		expect(previousModel).toHaveBeenCalledOnce();
+		expect(cycleThinking).toHaveBeenCalledOnce();
+		expect(editor.getText()).toBe("P");
+
+		keybindings.setUserBindings({
+			"app.model.cycleForward": [],
+			"app.model.cycleBackward": [],
+			"app.thinking.cycle": [],
+		});
+		editor.handleInput("\x18");
+		editor.handleInput("\x19");
+		editor.handleInput("\x07");
+
+		expect(nextModel).toHaveBeenCalledOnce();
+		expect(previousModel).toHaveBeenCalledOnce();
+		expect(cycleThinking).toHaveBeenCalledOnce();
+	});
+
 	it("splits terminal-batched repeats for the configured clear-input binding", () => {
 		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
 		const handler = vi.fn();

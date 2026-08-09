@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 #
-# Migrate sessions from ~/.pi/agent/*.jsonl to proper session directories.
-# This fixes sessions created by the bug in v0.30.0 where sessions were
-# saved to ~/.pi/agent/ instead of ~/.pi/agent/sessions/<encoded-cwd>/.
+# Migrate sessions from ~/.fulcrum/*.jsonl to the flat session directory.
+# This fixes sessions saved to ~/.fulcrum/ instead of ~/.fulcrum/sessions/.
 #
 # Usage: ./migrate-sessions.sh [--dry-run]
 #
 
 set -e
 
-AGENT_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"
+AGENT_DIR="${FULCRUM_AGENT_DIR:-$HOME/.fulcrum}"
 DRY_RUN=false
 
 if [[ "$1" == "--dry-run" ]]; then
@@ -37,31 +36,26 @@ failed=0
 for file in "${files[@]}"; do
     filename=$(basename "$file")
     
-    # Read first line and extract cwd using jq
+    # Read the first line and verify that it is a session header.
     if ! first_line=$(head -1 "$file" 2>/dev/null); then
         echo "SKIP: $filename - cannot read file"
         ((failed++))
         continue
     fi
     
-    # Parse JSON and extract cwd
-    if ! cwd=$(echo "$first_line" | jq -r '.cwd // empty' 2>/dev/null); then
+    if ! session_id=$(jq -r 'if .type == "session" then .id // empty else empty end' <<<"$first_line" 2>/dev/null); then
         echo "SKIP: $filename - invalid JSON"
         ((failed++))
         continue
     fi
-    
-    if [[ -z "$cwd" ]]; then
-        echo "SKIP: $filename - no cwd in session header"
+
+    if [[ -z "$session_id" ]]; then
+        echo "SKIP: $filename - invalid session header"
         ((failed++))
         continue
     fi
-    
-    # Encode cwd: remove leading slash, replace slashes with dashes, wrap with --
-    encoded=$(echo "$cwd" | sed 's|^/||' | sed 's|[/:\\]|-|g')
-    encoded="--${encoded}--"
-    
-    target_dir="$AGENT_DIR/sessions/$encoded"
+
+    target_dir="$AGENT_DIR/sessions"
     target_file="$target_dir/$filename"
     
     if [[ -e "$target_file" ]]; then
@@ -71,7 +65,7 @@ for file in "${files[@]}"; do
     fi
     
     echo "MIGRATE: $filename"
-    echo "    cwd: $cwd"
+    echo "    id:  $session_id"
     echo "    to:  $target_dir/"
     
     if [[ "$DRY_RUN" == false ]]; then

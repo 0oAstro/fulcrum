@@ -26,11 +26,11 @@ const IPYTHON_CONTROL_PROMPT = [
 	"",
 	"Python state in the kernel, by contrast, persists across cells: named variables, helper functions, classes, imports, notes, parsed outputs, and helper data structures all remain available in every later turn. Tool calls are themselves Python `await` expressions, so their return values can be bound to variables and composed into program logic just like any other call.",
 	"",
-	"Continual harness state is available as `rlm.harness` and `rlm.get_harness_state()`. CRUD calls are local to this Prime Agent session by default: `rlm.harness.create_memory(...)`, `rlm.harness.update_memory(...)`, `rlm.harness.delete_memory(...)`, `rlm.harness.create_skill(...)`, `rlm.harness.update_skill(...)`, `rlm.harness.delete_skill(...)`, `rlm.harness.create_subagent(...)`, `rlm.harness.update_subagent(...)`, `rlm.harness.delete_subagent(...)`, `rlm.harness.create_prompt_note(...)`, `rlm.harness.update_prompt_note(...)`, `rlm.harness.delete_prompt_note(...)`, plus `rlm.harness.record_refinement(...)` and `rlm.harness.overview()`. Use `global_=True` only for stable cross-session lessons; Python reserves `global`, so literal `global=True` is invalid syntax.",
+	"Continual harness state is available as `rlm.harness` and `rlm.get_harness_state()`. CRUD calls are local to this Fulcrum session by default: `rlm.harness.create_memory(...)`, `rlm.harness.update_memory(...)`, `rlm.harness.delete_memory(...)`, `rlm.harness.create_skill(...)`, `rlm.harness.update_skill(...)`, `rlm.harness.delete_skill(...)`, `rlm.harness.create_subagent(...)`, `rlm.harness.update_subagent(...)`, `rlm.harness.delete_subagent(...)`, `rlm.harness.create_prompt_note(...)`, `rlm.harness.update_prompt_note(...)`, `rlm.harness.delete_prompt_note(...)`, plus `rlm.harness.record_refinement(...)` and `rlm.harness.overview()`. Use `global_=True` only for stable cross-session lessons; Python reserves `global`, so literal `global=True` is invalid syntax.",
 	"",
 	"Terminology: continual harness names the persisted prompt, memory, skill, and subagent layer; RLM names the runtime, IPython kernel, and native call interface exposed to the model.",
 	"",
-	"RLM-native call contract: installed Python skills are pre-imported modules. Read the matching SKILL.md and call its documented function, such as `await <skill_import>.<function>(...)`; when a CLI exists, use `<skill_import> ...` from shell. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a reusable delegation spec with `await rlm('sub-task')`; admission returns a child handle immediately. Results arrive only through an available messaging capability or files, never as an `rlm()` return value. Do not invent non-native wrappers such as `call_skill(...)` or `run_subagent(...)`.",
+	"RLM-native call contract: installed Python skills are pre-imported modules. Call the prepared import directly; do not guess or reconstruct a SKILL.md path. Inspect a module with `help(<skill>)`, `dir(<skill>)`, or `inspect.signature(...)` when its callable is unclear. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a reusable delegation spec with `await rlm('sub-task')`; admission returns a child handle immediately. Results arrive only through an available messaging capability or files, never as an `rlm()` return value. Do not invent non-native wrappers such as `call_skill(...)` or `run_subagent(...)`.",
 ].join("\n");
 
 export interface ChildAgentDoctrineOptions {
@@ -86,14 +86,16 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 
 	const skillLines: string[] = [];
 	if (skillsDir) {
-		skillLines.push(`Local skills live under ${skillsDir}. Read their SKILL.md files when helpful.`);
+		skillLines.push(
+			`User-created local skills live under ${skillsDir}. Do not assume bundled or prepared Python modules live there.`,
+		);
 	}
 	if (installedSkills.length > 0) {
 		const installed = installedSkills.map((skill) => `\`${skill}\``).join(", ");
 		if (hasIpython) {
 			skillLines.push(`Installed Python skill modules (pre-imported): ${installed}.`);
 			skillLines.push(
-				"Read each skill's SKILL.md for its API. Inspect a module with `help(<skill>)` or `dir(<skill>)`, then inspect a documented callable with `inspect.signature(<skill>.<function>)`.",
+				"Call prepared imports directly. Do not locate their SKILL.md before use; inspect a module with `help(<skill>)` or `dir(<skill>)`, then use `inspect.signature(<skill>.<function>)` when needed.",
 			);
 		} else if (canRunShellSkills) {
 			skillLines.push(`Installed skills available as shell commands: ${installed}.`);
@@ -151,6 +153,10 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 	}
 
 	if (hasIpython) {
+		parts.push(
+			"",
+			'First-party web modules are already imported into the persistent kernel: default to `await websearch.search(query, limit=5, include_domains=None, exclude_domains=None, recency=None)` for factual lookups, use `await websearch.open(url, formats=["markdown"], only_main_content=True)` for page content and `await websearch.map(url, limit=100)` for site links, and opt into `await websearch.research(topic, queries=None, instruction=None, include_domains=None, exclude_domains=None, recency=None)` only for contested, high-stakes, or genuinely multi-source work; pass explicit orthogonal `queries` when you know them. Use `await browser.fetch(url, instruction)` only when a cheap model should extract page content. They are built-in modules, not skills; never look for a websearch or browser SKILL.md.',
+		);
 		parts.push("", IPYTHON_CONTROL_PROMPT);
 		if (installedSkills.includes("refine")) {
 			parts.push(

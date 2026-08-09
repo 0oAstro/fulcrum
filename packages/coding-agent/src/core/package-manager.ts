@@ -40,7 +40,7 @@ const UPDATE_CHECK_CONCURRENCY = 4;
 const GIT_UPDATE_CONCURRENCY = 4;
 
 function isOfflineModeEnabled(): boolean {
-	const value = process.env.PI_OFFLINE;
+	const value = process.env.FULCRUM_OFFLINE;
 	if (!value) return false;
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
@@ -176,7 +176,7 @@ interface ResourceAccumulator {
  *   2  user + settings entry (source: "local", scope: "user")
  *   3  user + auto-discovered (source: "auto", scope: "user")
  *   4  package resource (origin: "package")
- *   5  built-in resource shipped with prime-agent (source: "builtin")
+ *   5  built-in resource shipped with fulcrum (source: "builtin")
  */
 function resourcePrecedenceRank(m: PathMetadata): number {
 	if (m.source === "builtin") return 5;
@@ -336,14 +336,7 @@ function collectFiles(
 	return files;
 }
 
-type SkillDiscoveryMode = "pi" | "agents";
-
-function collectSkillEntries(
-	dir: string,
-	mode: SkillDiscoveryMode,
-	ignoreMatcher?: IgnoreMatcher,
-	rootDir?: string,
-): string[] {
+function collectSkillEntries(dir: string, ignoreMatcher?: IgnoreMatcher, rootDir?: string): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
 
@@ -395,7 +388,7 @@ function collectSkillEntries(
 			}
 
 			const relPath = toPosixPath(relative(root, fullPath));
-			if (mode === "pi" && dir === root && isFile && entry.name.endsWith(".md") && !ig.ignores(relPath)) {
+			if (dir === root && isFile && entry.name.endsWith(".md") && !ig.ignores(relPath)) {
 				entries.push(fullPath);
 				continue;
 			}
@@ -403,7 +396,7 @@ function collectSkillEntries(
 			if (!isDir) continue;
 			if (ig.ignores(`${relPath}/`)) continue;
 
-			entries.push(...collectSkillEntries(fullPath, mode, ig, root));
+			entries.push(...collectSkillEntries(fullPath, ig, root));
 		}
 	} catch {
 		// Ignore errors
@@ -412,43 +405,8 @@ function collectSkillEntries(
 	return entries;
 }
 
-function collectAutoSkillEntries(dir: string, mode: SkillDiscoveryMode): string[] {
-	return collectSkillEntries(dir, mode);
-}
-
-function findGitRepoRoot(startDir: string): string | null {
-	let dir = resolve(startDir);
-	while (true) {
-		if (existsSync(join(dir, ".git"))) {
-			return dir;
-		}
-		const parent = dirname(dir);
-		if (parent === dir) {
-			return null;
-		}
-		dir = parent;
-	}
-}
-
-function collectAncestorAgentsSkillDirs(startDir: string): string[] {
-	const skillDirs: string[] = [];
-	const resolvedStartDir = resolve(startDir);
-	const gitRepoRoot = findGitRepoRoot(resolvedStartDir);
-
-	let dir = resolvedStartDir;
-	while (true) {
-		skillDirs.push(join(dir, ".agents", "skills"));
-		if (gitRepoRoot && dir === gitRepoRoot) {
-			break;
-		}
-		const parent = dirname(dir);
-		if (parent === dir) {
-			break;
-		}
-		dir = parent;
-	}
-
-	return skillDirs;
+function collectAutoSkillEntries(dir: string): string[] {
+	return collectSkillEntries(dir);
 }
 
 function collectAutoPromptEntries(dir: string): string[] {
@@ -625,7 +583,7 @@ function collectAutoExtensionEntries(dir: string): string[] {
  */
 function collectResourceFiles(dir: string, resourceType: ResourceType): string[] {
 	if (resourceType === "skills") {
-		return collectSkillEntries(dir, "pi");
+		return collectSkillEntries(dir);
 	}
 	if (resourceType === "extensions") {
 		return collectAutoExtensionEntries(dir);
@@ -2178,11 +2136,6 @@ export class DefaultPackageManager implements PackageManager {
 			prompts: join(projectBaseDir, "prompts"),
 			themes: join(projectBaseDir, "themes"),
 		};
-		const userAgentsSkillsDir = join(getHomeDir(), ".agents", "skills");
-		const projectAgentsSkillDirs = collectAncestorAgentsSkillDirs(this.cwd).filter(
-			(dir) => resolve(dir) !== resolve(userAgentsSkillsDir),
-		);
-
 		const addResources = (
 			resourceType: ResourceType,
 			paths: string[],
@@ -2206,10 +2159,7 @@ export class DefaultPackageManager implements PackageManager {
 		);
 		addResources(
 			"skills",
-			[
-				...collectAutoSkillEntries(projectDirs.skills, "pi"),
-				...projectAgentsSkillDirs.flatMap((dir) => collectAutoSkillEntries(dir, "agents")),
-			],
+			collectAutoSkillEntries(projectDirs.skills),
 			projectMetadata,
 			projectOverrides.skills,
 			projectBaseDir,
@@ -2238,7 +2188,7 @@ export class DefaultPackageManager implements PackageManager {
 		);
 		addResources(
 			"skills",
-			[...collectAutoSkillEntries(userDirs.skills, "pi"), ...collectAutoSkillEntries(userAgentsSkillsDir, "agents")],
+			collectAutoSkillEntries(userDirs.skills),
 			userMetadata,
 			userOverrides.skills,
 			globalBaseDir,
@@ -2251,7 +2201,7 @@ export class DefaultPackageManager implements PackageManager {
 				origin: "top-level",
 				baseDir: this.bundledSkillsDir,
 			};
-			const builtinEntries = collectAutoSkillEntries(this.bundledSkillsDir, "pi");
+			const builtinEntries = collectAutoSkillEntries(this.bundledSkillsDir);
 			// Built-in skills (edit, goal, …) are expected to ship with the package. A
 			// packaging slip that drops the skills/ dir from the build output would
 			// otherwise degrade silently to zero skills (ENG-4220); surface it loudly.
@@ -2264,13 +2214,7 @@ export class DefaultPackageManager implements PackageManager {
 					path: this.bundledSkillsDir,
 				});
 			}
-			const builtinSkillOverrides = [
-				...userOverrides.skills,
-				// Disable the bundled websearch skill unless explicitly enabled…
-				...(this.settingsManager.getBundledWebsearchEnabled() ? [] : ["-websearch/SKILL.md"]),
-				// …and disable any MCP integration the user hasn't logged into.
-				...this.extraBuiltinSkillOverrides(),
-			];
+			const builtinSkillOverrides = [...userOverrides.skills, ...this.extraBuiltinSkillOverrides()];
 			addResources("skills", builtinEntries, builtinMetadata, builtinSkillOverrides, this.bundledSkillsDir);
 		}
 		addResources(

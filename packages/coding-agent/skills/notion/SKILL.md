@@ -44,6 +44,6 @@ Notes:
   string). No need to `json.loads` them.
 - Run `list_tools()` before relying on `help()` or assuming a tool exists — the
   server's schema is the source of truth for names and arguments.
-- The kernel import name is `notion`. On a custom `PRIME_AGENT_KERNEL_PYTHON` that
+- The kernel import name is `notion`. On a custom `FULCRUM_KERNEL_PYTHON` that
   already has the unrelated PyPI `notion` client installed, `import notion` may
   resolve to that instead; use the default managed kernel venv to avoid the clash.

@@ -201,7 +201,7 @@ describe("ENG-4575 model authentication", () => {
 	test("filters shared model argument completions by provider and model id", () => {
 		expect(
 			getModelArgumentCompletions("openai gpt-5.4", [
-				{ provider: "prime-inference", id: "openai/gpt-5.5" },
+				{ provider: "anthropic", id: "openai/gpt-5.5" },
 				{ provider: "openai", id: "gpt-5.4" },
 			]),
 		).toContainEqual({ value: "openai/gpt-5.4", label: "gpt-5.4", description: "openai" });

@@ -30,12 +30,12 @@ function tryConnect(socketPath) {
 }
 
 async function measureOnce(i) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-daemon-bench-"));
+	const dir = mkdtempSync(join(tmpdir(), "fulcrum-daemon-bench-"));
 	const socketPath = join(dir, "daemon.sock");
 	const start = performance.now();
 	const child = spawn(process.execPath, [entrypoint, "--mode", "daemon", "--daemon-socket", socketPath], {
 		stdio: "ignore",
-		env: { ...process.env, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" },
+		env: { ...process.env, FULCRUM_OFFLINE: "1", FULCRUM_SKIP_VERSION_CHECK: "1" },
 	});
 	let ready;
 	const deadline = performance.now() + 30000;

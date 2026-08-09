@@ -16,13 +16,12 @@ import {
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { formatNoModelsAvailableMessage } from "../src/core/auth-guidance.js";
-import { type AuthStatus, AuthStorage } from "../src/core/auth-storage.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.js";
 import { emptyGoalState, type GoalState } from "../src/core/goals.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
-import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { emptyUsage } from "../src/core/usage.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type {
@@ -1857,7 +1856,7 @@ describe("InteractiveMode startup onboarding warnings", () => {
 		getModelFallbackWarningAction,
 	});
 
-	const liveModel = { id: "gpt-5.5", provider: "prime-inference" } as AgentConnectionModel;
+	const liveModel = { id: "gpt-5.5", provider: "openai" } as AgentConnectionModel;
 
 	test("suppresses the no-model warning when the live session has a model", () => {
 		const fakeThis = createHarness({ currentModel: liveModel });
@@ -1877,7 +1876,7 @@ describe("InteractiveMode startup onboarding warnings", () => {
 		expect(
 			getModelFallbackWarningAction.call(
 				fakeThis,
-				"Could not restore model anthropic/claude-old. Using prime-inference/openai/gpt-5.5.",
+				"Could not restore model anthropic/claude-old. Using openai/openai/gpt-5.5.",
 			),
 		).toBe("show");
 	});
@@ -2921,58 +2920,7 @@ describe("InteractiveMode session switch command catalog", () => {
 	});
 });
 
-describe("InteractiveMode Prime CLI onboarding", () => {
-	type OnboardingSplashHandle = {
-		showProgress(message: string): void;
-		dismiss(): void;
-	};
-	type OnboardingHarness = {
-		shouldRunOnboarding(): boolean;
-		markOnboardingShown(): void;
-		runStartupOnboarding(): Promise<boolean>;
-		runOnboardingFlow(showPrimeCliSplash?: boolean): Promise<void>;
-		applySelectedModel(model: AgentConnectionModel): Promise<void>;
-		prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean>;
-		setupAutocompleteProvider(): void;
-	};
-	type OnboardingFake = OnboardingHarness & {
-		connectionState: AgentConnectionState;
-		connectionModels: AgentConnectionModel[];
-		agentConnection: {
-			getAvailableModels?: () => Promise<AgentConnectionModel[]>;
-			setModel?: (provider: string, modelId: string) => Promise<void>;
-		};
-		uiServices: {
-			modelRegistry: {
-				authStorage: Pick<AuthStorage, "get">;
-				refresh: () => void;
-				hasConfiguredAuth: (model: unknown) => boolean;
-				getProviderAuthStatus: (provider: string) => AuthStatus;
-			};
-			settingsManager: {
-				getOnboardingShown: () => boolean;
-				setOnboardingShown: (shown: boolean) => void;
-				setDefaultModelAndProvider: (provider: string, modelId: string) => void;
-				flush: () => Promise<void>;
-			};
-		};
-		footer?: { invalidate: () => void };
-		updateEditorBorderColor?: () => void;
-		showStatus?: (message: string) => void;
-		showError?: (message: string) => void;
-		patchConnectionState?: (patch: Partial<AgentConnectionState>) => void;
-		maybeWarnAboutAnthropicSubscriptionAuth?: (model?: AgentConnectionModel) => void;
-		checkDaxnutsEasterEgg?: (model: { provider: string; id: string }) => void;
-		findExactModelMatch?: (searchTerm: string) => Promise<AgentConnectionModel | undefined>;
-		showOnboardingSplash?: (continueActionLabel?: string) => Promise<OnboardingSplashHandle | undefined>;
-		createAuthFlows?: () => { runPrimeInferenceLogin(): Promise<AuthenticationResult> };
-		showConfigurationMenu?: (tab: "providers" | "models" | "mcp-connections") => Promise<void>;
-		getModelCandidates?: () => Promise<AgentConnectionModel[]>;
-	};
-	const shouldRunOnboarding = (InteractiveMode.prototype as unknown as OnboardingHarness).shouldRunOnboarding;
-	const markOnboardingShown = (InteractiveMode.prototype as unknown as OnboardingHarness).markOnboardingShown;
-	const runStartupOnboarding = (InteractiveMode.prototype as unknown as OnboardingHarness).runStartupOnboarding;
-	const runOnboardingFlow = (InteractiveMode.prototype as unknown as OnboardingHarness).runOnboardingFlow;
+describe("InteractiveMode startup admission", () => {
 	const startupRunResult = {
 		type: "agents_view",
 		source: {
@@ -3003,12 +2951,12 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		};
 	}
 
-	const primeModel: AgentConnectionModel = {
+	const startupModel: AgentConnectionModel = {
 		id: "openai/gpt-5.5",
 		name: "GPT-5.5",
 		api: "openai-completions",
-		provider: PRIME_INFERENCE_PROVIDER_ID,
-		baseUrl: "https://api.pinference.ai/api/v1",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
 		reasoning: true,
 		input: ["text"],
 		cost: {
@@ -3062,7 +3010,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 			await vi.advanceTimersByTimeAsync(250);
 			expect(prompt).not.toHaveBeenCalled();
 
-			model = primeModel;
+			model = startupModel;
 			const userSubmission = fakeThis.defaultEditor.onSubmit?.("user");
 			await vi.advanceTimersByTimeAsync(1_250);
 			await userSubmission;
@@ -3138,7 +3086,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 						initialPrompts: [{ text: "later [image #2]", images: [secondImage] }, { text: "last [image #4]" }],
 					},
 					{
-						getCurrentModel: () => primeModel,
+						getCurrentModel: () => startupModel,
 						getUserInput: vi.fn(() => inputDone.promise),
 						agentConnection: submitHarness.agentConnection,
 					},
@@ -3191,7 +3139,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 			createStartupRunHarness(
 				{ initialMessages: ["owned startup", "next startup"] },
 				{
-					getCurrentModel: () => primeModel,
+					getCurrentModel: () => startupModel,
 					getUserInput: vi.fn(() => inputDone.promise),
 					agentConnection: submitHarness.agentConnection,
 				},
@@ -3266,7 +3214,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 				if (scenario === "typing") editorText = "typing during startup wait";
 				const duplicate = scenario === "Alt+Enter" ? submit() : undefined;
 				expect(prompt).not.toHaveBeenCalled();
-				model = primeModel;
+				model = startupModel;
 				await vi.advanceTimersByTimeAsync(250);
 				expect(prompt.mock.calls.map(([message]) => message)).toEqual(["startup"]);
 				await vi.advanceTimersByTimeAsync(249);
@@ -3314,7 +3262,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 			createStartupRunHarness(
 				{ initialMessage: "startup" },
 				{
-					getCurrentModel: () => primeModel,
+					getCurrentModel: () => startupModel,
 					getUserInput: vi.fn(() => inputDone.promise),
 				},
 			),
@@ -3596,7 +3544,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		const fakeThis = createStartupRunHarness(
 			{},
 			{
-				getCurrentModel: vi.fn(() => primeModel),
+				getCurrentModel: vi.fn(() => startupModel),
 				getUserInput: vi.fn(async () => undefined),
 				agentConnection: { prompt },
 				returnToAgentsViewRequested: false,
@@ -3607,261 +3555,17 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		expect(fakeThis.getUserInput).toHaveBeenCalledOnce();
 		expect(prompt).not.toHaveBeenCalled();
 	});
-
-	function createPrimeCliHarness(shown: boolean): OnboardingFake {
-		const fakeThis = Object.create(InteractiveMode.prototype) as OnboardingFake;
-		fakeThis.connectionState = createConnectionState({ model: primeModel });
-		fakeThis.connectionModels = [primeModel];
-		fakeThis.agentConnection = {
-			getAvailableModels: vi.fn(async () => [primeModel]),
-		};
-		fakeThis.uiServices = {
-			modelRegistry: {
-				authStorage: AuthStorage.inMemory(),
-				refresh: vi.fn(),
-				hasConfiguredAuth: vi.fn(() => true),
-				getProviderAuthStatus: vi.fn(
-					(): AuthStatus => ({
-						configured: false,
-						source: "prime_cli",
-					}),
-				),
-			},
-			settingsManager: {
-				getOnboardingShown: vi.fn(() => shown),
-				setOnboardingShown: vi.fn(),
-				setDefaultModelAndProvider: vi.fn(),
-				flush: vi.fn(async () => {}),
-			},
-		};
-		fakeThis.getModelCandidates = vi.fn(async () => [primeModel]);
-		return fakeThis;
-	}
-
-	test("shows onboarding when the selected Prime model is backed by Prime CLI auth", () => {
-		const fakeThis = createPrimeCliHarness(false);
-
-		expect(shouldRunOnboarding.call(fakeThis)).toBe(true);
-		expect(fakeThis.uiServices.modelRegistry.refresh).toHaveBeenCalledTimes(1);
-	});
-
-	test("skips Prime CLI onboarding after it has been shown", () => {
-		const fakeThis = createPrimeCliHarness(true);
-
-		expect(shouldRunOnboarding.call(fakeThis)).toBe(false);
-	});
-
-	test("persists that onboarding was shown once", () => {
-		const fakeThis = createPrimeCliHarness(false);
-
-		markOnboardingShown.call(fakeThis);
-
-		expect(fakeThis.uiServices.settingsManager.setOnboardingShown).toHaveBeenCalledWith(true);
-	});
-
-	test("persists onboarding before opening the one-shot flow", async () => {
-		let shown = false;
-		let flushed = false;
-		const fakeThis = createPrimeCliHarness(false);
-		fakeThis.uiServices.settingsManager.getOnboardingShown = vi.fn(() => shown);
-		fakeThis.uiServices.settingsManager.setOnboardingShown = vi.fn((nextShown: boolean) => {
-			shown = nextShown;
-		});
-		fakeThis.uiServices.settingsManager.flush = vi.fn(async () => {
-			flushed = true;
-		});
-		fakeThis.runOnboardingFlow = vi.fn(async (showPrimeCliSplash?: boolean) => {
-			expect(showPrimeCliSplash).toBe(true);
-			expect(shown).toBe(true);
-			expect(flushed).toBe(true);
-		});
-
-		await expect(runStartupOnboarding.call(fakeThis)).resolves.toBe(true);
-
-		expect(fakeThis.uiServices.settingsManager.setOnboardingShown).toHaveBeenCalledWith(true);
-		expect(fakeThis.uiServices.settingsManager.flush).toHaveBeenCalledTimes(1);
-		expect(fakeThis.runOnboardingFlow).toHaveBeenCalledWith(true);
-	});
-
-	test("cancelled Prime CLI splash exits onboarding before opening configuration", async () => {
-		const fakeThis = createPrimeCliHarness(false);
-		fakeThis.showOnboardingSplash = vi.fn(async () => undefined);
-		fakeThis.showConfigurationMenu = vi.fn(async () => {});
-
-		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBeUndefined();
-
-		expect(fakeThis.showConfigurationMenu).not.toHaveBeenCalled();
-	});
-
-	test("opens the Models tab after the Prime CLI splash", async () => {
-		const fakeThis = createPrimeCliHarness(false);
-		const configuration = createDeferred<void>();
-		const dismiss = vi.fn();
-		fakeThis.showOnboardingSplash = vi.fn(async () => ({ showProgress: vi.fn(), dismiss }));
-		fakeThis.showConfigurationMenu = vi.fn(() => configuration.promise);
-
-		const onboarding = runOnboardingFlow.call(fakeThis);
-		await flushAsyncWork();
-
-		expect(fakeThis.showConfigurationMenu).toHaveBeenCalledWith("models");
-		expect(dismiss).not.toHaveBeenCalled();
-
-		configuration.resolve();
-		await expect(onboarding).resolves.toBeUndefined();
-
-		expect(dismiss).toHaveBeenCalledTimes(1);
-	});
-
-	test("opens the Models tab when models are already available", async () => {
-		const fakeThis = createPrimeCliHarness(false);
-		fakeThis.connectionState = createConnectionState({ model: undefined });
-		fakeThis.getModelCandidates = vi.fn(async () => [primeModel]);
-		fakeThis.showConfigurationMenu = vi.fn(async () => {});
-
-		await expect(runOnboardingFlow.call(fakeThis, false)).resolves.toBeUndefined();
-
-		expect(fakeThis.getModelCandidates).toHaveBeenCalledTimes(1);
-		expect(fakeThis.showConfigurationMenu).toHaveBeenCalledWith("models");
-	});
-
-	test("opens Prime login before the Models tab when no models are available", async () => {
-		const fakeThis = createPrimeCliHarness(false);
-		fakeThis.connectionState = createConnectionState({ model: undefined });
-		fakeThis.getModelCandidates = vi.fn(async () => []);
-		const showProgress = vi.fn();
-		const dismiss = vi.fn();
-		fakeThis.showOnboardingSplash = vi.fn(async () => ({ showProgress, dismiss }));
-		fakeThis.createAuthFlows = vi.fn(() => ({
-			runPrimeInferenceLogin: vi.fn(async () => ({
-				status: "success" as const,
-				providerId: PRIME_INFERENCE_PROVIDER_ID,
-				providerName: "Prime Inference",
-				authType: "api_key" as const,
-				kind: "provider" as const,
-			})),
-		}));
-		fakeThis.prepareForModelSelectionAfterLogin = vi.fn(async () => true);
-		const configuration = createDeferred<void>();
-		fakeThis.showConfigurationMenu = vi.fn(() => configuration.promise);
-
-		const onboarding = runOnboardingFlow.call(fakeThis, false);
-		await flushAsyncWork();
-
-		expect(fakeThis.showOnboardingSplash).toHaveBeenCalledWith();
-		expect(showProgress).toHaveBeenNthCalledWith(1, "Signing in to Prime Intellect...");
-		expect(showProgress).toHaveBeenNthCalledWith(2, "Preparing models...");
-		expect(fakeThis.prepareForModelSelectionAfterLogin).toHaveBeenCalledTimes(1);
-		expect(fakeThis.showConfigurationMenu).toHaveBeenCalledWith("models");
-		expect(dismiss).not.toHaveBeenCalled();
-
-		configuration.resolve();
-		await expect(onboarding).resolves.toBeUndefined();
-
-		expect(dismiss).toHaveBeenCalledTimes(1);
-	});
-});
-
-describe("InteractiveMode post-login model preparation", () => {
-	type LoginHarness = {
-		prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean>;
-		invalidateConnectionModels(): void;
-		getCurrentModel(): AgentConnectionModel | undefined;
-		applySelectedModel(model: AgentConnectionModel): Promise<void>;
-		showError(message: string): void;
-		uiServices: {
-			modelRegistry: Pick<ModelRegistry, "find">;
-			settingsManager: {
-				flush(): Promise<void>;
-			};
-		};
-	};
-
-	const prepareForModelSelectionAfterLogin = (InteractiveMode.prototype as unknown as LoginHarness)
-		.prepareForModelSelectionAfterLogin;
-	const loginPrimeModel: AgentConnectionModel = {
-		id: "openai/gpt-5.5",
-		name: "GPT-5.5",
-		api: "openai-completions",
-		provider: PRIME_INFERENCE_PROVIDER_ID,
-		baseUrl: "https://api.pinference.ai/api/v1",
-		reasoning: true,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 1050000,
-		maxTokens: 128000,
-	} as AgentConnectionModel;
-
-	test("persists GLM 5.2 before model selection after Prime Inference login", async () => {
-		const fallbackModel = { ...loginPrimeModel, id: "z-ai/glm-5.2", name: "GLM 5.2" };
-		const flushSettings = vi.fn(async () => {});
-		const fakeThis = Object.create(InteractiveMode.prototype) as LoginHarness;
-		fakeThis.invalidateConnectionModels = vi.fn();
-		fakeThis.getCurrentModel = vi.fn(() => undefined);
-		fakeThis.applySelectedModel = vi.fn(async () => {});
-		fakeThis.showError = vi.fn();
-		fakeThis.uiServices = {
-			modelRegistry: {
-				find: vi.fn(() => fallbackModel),
-			},
-			settingsManager: {
-				flush: flushSettings,
-			},
-		};
-
-		await expect(
-			prepareForModelSelectionAfterLogin.call(fakeThis, {
-				status: "success",
-				providerId: PRIME_INFERENCE_PROVIDER_ID,
-				providerName: "Prime Inference",
-				authType: "api_key",
-				kind: "provider",
-			}),
-		).resolves.toBe(true);
-
-		expect(fakeThis.invalidateConnectionModels).not.toHaveBeenCalled();
-		expect(fakeThis.applySelectedModel).toHaveBeenCalledWith(fallbackModel);
-		expect(flushSettings).toHaveBeenCalledTimes(1);
-	});
-
-	test("preserves refreshed models after any model-provider login", async () => {
-		const fakeThis = Object.create(InteractiveMode.prototype) as LoginHarness;
-		fakeThis.invalidateConnectionModels = vi.fn();
-		fakeThis.getCurrentModel = vi.fn(() => loginPrimeModel);
-		fakeThis.applySelectedModel = vi.fn(async () => {});
-		fakeThis.showError = vi.fn();
-		fakeThis.uiServices = {
-			modelRegistry: {
-				find: vi.fn(() => undefined),
-			},
-			settingsManager: {
-				flush: vi.fn(async () => {}),
-			},
-		};
-
-		await expect(
-			prepareForModelSelectionAfterLogin.call(fakeThis, {
-				status: "success",
-				providerId: "anthropic",
-				providerName: "Anthropic",
-				authType: "oauth",
-				kind: "provider",
-			}),
-		).resolves.toBe(false);
-
-		expect(fakeThis.invalidateConnectionModels).not.toHaveBeenCalled();
-		expect(fakeThis.applySelectedModel).not.toHaveBeenCalled();
-	});
 });
 
 describe("InteractiveMode splash cwd display", () => {
 	test("formats home-relative cwd paths", () => {
 		expect(formatSplashCwd(homedir())).toBe("~");
-		expect(formatSplashCwd(path.join(homedir(), "pi", "prime-agent"))).toBe("~/pi/prime-agent");
+		expect(formatSplashCwd(path.join(homedir(), "pi", "fulcrum"))).toBe("~/pi/fulcrum");
 	});
 
 	test("keeps worktree paths as cwd paths instead of repo branch labels", () => {
-		expect(formatSplashCwd(path.join(homedir(), "pi", "prime-agent", ".worktrees", "improve-onboarding"))).toBe(
-			"~/pi/prime-agent/.worktrees/improve-onboarding",
+		expect(formatSplashCwd(path.join(homedir(), "pi", "fulcrum", ".worktrees", "improve-onboarding"))).toBe(
+			"~/pi/fulcrum/.worktrees/improve-onboarding",
 		);
 	});
 });
@@ -4452,21 +4156,21 @@ describe("InteractiveMode.showLoadedResources", () => {
 	function createExtensionFixtures(): ExtensionFixture[] {
 		return [
 			{
-				path: "/tmp/project/.pi/extensions/answer.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.pi/extensions/answer.ts", {
+				path: "/tmp/project/.fulcrum/extensions/answer.ts",
+				sourceInfo: createSourceInfo("/tmp/project/.fulcrum/extensions/answer.ts", {
 					source: "local",
 					scope: "project",
 					origin: "top-level",
-					baseDir: "/tmp/project/.pi/extensions",
+					baseDir: "/tmp/project/.fulcrum/extensions",
 				}),
 			},
 			{
-				path: "/tmp/project/.pi/extensions/local-index/index.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.pi/extensions/local-index/index.ts", {
+				path: "/tmp/project/.fulcrum/extensions/local-index/index.ts",
+				sourceInfo: createSourceInfo("/tmp/project/.fulcrum/extensions/local-index/index.ts", {
 					source: "local",
 					scope: "project",
 					origin: "top-level",
-					baseDir: "/tmp/project/.pi/extensions",
+					baseDir: "/tmp/project/.fulcrum/extensions",
 				}),
 			},
 			{
@@ -4479,44 +4183,50 @@ describe("InteractiveMode.showLoadedResources", () => {
 				}),
 			},
 			{
-				path: "/tmp/project/.pi/npm/node_modules/pi-markdown-preview/extensions/index.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.pi/npm/node_modules/pi-markdown-preview/extensions/index.ts", {
-					source: "npm:pi-markdown-preview",
-					scope: "project",
-					origin: "package",
-					baseDir: "/tmp/project/.pi/npm/node_modules/pi-markdown-preview",
-				}),
-			},
-			{
-				path: "/tmp/project/.pi/npm/node_modules/@scope/pi-scoped/extensions/index.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.pi/npm/node_modules/@scope/pi-scoped/extensions/index.ts", {
-					source: "npm:@scope/pi-scoped",
-					scope: "project",
-					origin: "package",
-					baseDir: "/tmp/project/.pi/npm/node_modules/@scope/pi-scoped",
-				}),
-			},
-			{
-				path: "/tmp/project/.pi/git/github.com/HazAT/pi-interactive-subagents/extensions/index.ts",
+				path: "/tmp/project/.fulcrum/npm/node_modules/pi-markdown-preview/extensions/index.ts",
 				sourceInfo: createSourceInfo(
-					"/tmp/project/.pi/git/github.com/HazAT/pi-interactive-subagents/extensions/index.ts",
+					"/tmp/project/.fulcrum/npm/node_modules/pi-markdown-preview/extensions/index.ts",
 					{
-						source: "git:github.com/HazAT/pi-interactive-subagents",
+						source: "npm:pi-markdown-preview",
 						scope: "project",
 						origin: "package",
-						baseDir: "/tmp/project/.pi/git/github.com/HazAT/pi-interactive-subagents",
+						baseDir: "/tmp/project/.fulcrum/npm/node_modules/pi-markdown-preview",
 					},
 				),
 			},
 			{
-				path: "/tmp/project/.pi/git/github.com/HazAT/pi-interactive-subagents/extensions/subagents/index.ts",
+				path: "/tmp/project/.fulcrum/npm/node_modules/@scope/pi-scoped/extensions/index.ts",
 				sourceInfo: createSourceInfo(
-					"/tmp/project/.pi/git/github.com/HazAT/pi-interactive-subagents/extensions/subagents/index.ts",
+					"/tmp/project/.fulcrum/npm/node_modules/@scope/pi-scoped/extensions/index.ts",
+					{
+						source: "npm:@scope/pi-scoped",
+						scope: "project",
+						origin: "package",
+						baseDir: "/tmp/project/.fulcrum/npm/node_modules/@scope/pi-scoped",
+					},
+				),
+			},
+			{
+				path: "/tmp/project/.fulcrum/git/github.com/HazAT/pi-interactive-subagents/extensions/index.ts",
+				sourceInfo: createSourceInfo(
+					"/tmp/project/.fulcrum/git/github.com/HazAT/pi-interactive-subagents/extensions/index.ts",
 					{
 						source: "git:github.com/HazAT/pi-interactive-subagents",
 						scope: "project",
 						origin: "package",
-						baseDir: "/tmp/project/.pi/git/github.com/HazAT/pi-interactive-subagents",
+						baseDir: "/tmp/project/.fulcrum/git/github.com/HazAT/pi-interactive-subagents",
+					},
+				),
+			},
+			{
+				path: "/tmp/project/.fulcrum/git/github.com/HazAT/pi-interactive-subagents/extensions/subagents/index.ts",
+				sourceInfo: createSourceInfo(
+					"/tmp/project/.fulcrum/git/github.com/HazAT/pi-interactive-subagents/extensions/subagents/index.ts",
+					{
+						source: "git:github.com/HazAT/pi-interactive-subagents",
+						scope: "project",
+						origin: "package",
+						baseDir: "/tmp/project/.fulcrum/git/github.com/HazAT/pi-interactive-subagents",
 					},
 				),
 			},
@@ -4872,13 +4582,16 @@ describe("InteractiveMode.showLoadedResources", () => {
 	test("package extensions still strip index.ts correctly (regression guard)", () => {
 		const extensions: ExtensionFixture[] = [
 			{
-				path: "/tmp/project/.pi/npm/node_modules/pi-markdown-preview/extensions/index.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.pi/npm/node_modules/pi-markdown-preview/extensions/index.ts", {
-					source: "npm:pi-markdown-preview",
-					scope: "project",
-					origin: "package",
-					baseDir: "/tmp/project/.pi/npm/node_modules/pi-markdown-preview",
-				}),
+				path: "/tmp/project/.fulcrum/npm/node_modules/pi-markdown-preview/extensions/index.ts",
+				sourceInfo: createSourceInfo(
+					"/tmp/project/.fulcrum/npm/node_modules/pi-markdown-preview/extensions/index.ts",
+					{
+						source: "npm:pi-markdown-preview",
+						scope: "project",
+						origin: "package",
+						baseDir: "/tmp/project/.fulcrum/npm/node_modules/pi-markdown-preview",
+					},
+				),
 			},
 		];
 
@@ -4911,8 +4624,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   project
-    /tmp/project/.pi/extensions/answer.ts
-    /tmp/project/.pi/extensions/local-index
+    /tmp/project/.fulcrum/extensions/answer.ts
+    /tmp/project/.fulcrum/extensions/local-index
     git:github.com/HazAT/pi-interactive-subagents
       extensions
       extensions/subagents
@@ -4932,7 +4645,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 		const fakeThis = createShowLoadedResourcesThis({
 			quietStartup: false,
 			cwd,
-			contextFiles: [{ path: path.join(home, ".pi", "agent", "AGENTS.md") }, { path: path.join(cwd, "AGENTS.md") }],
+			contextFiles: [{ path: path.join(home, ".fulcrum", "AGENTS.md") }, { path: path.join(cwd, "AGENTS.md") }],
 		});
 
 		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
@@ -4941,7 +4654,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 
 		const output = renderAll(fakeThis.chatContainer).replace(/\\/g, "/");
 		expect(output).toContain("[Context]");
-		expect(output).toContain("~/.pi/agent/AGENTS.md, AGENTS.md");
+		expect(output).toContain("~/.fulcrum/AGENTS.md, AGENTS.md");
 		expect(output).not.toContain(`${cwd.replace(/\\/g, "/")}/AGENTS.md`);
 	});
 
@@ -4952,7 +4665,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			quietStartup: false,
 			toolOutputExpanded: true,
 			cwd,
-			contextFiles: [{ path: path.join(home, ".pi", "agent", "AGENTS.md") }, { path: path.join(cwd, "AGENTS.md") }],
+			contextFiles: [{ path: path.join(home, ".fulcrum", "AGENTS.md") }, { path: path.join(cwd, "AGENTS.md") }],
 		});
 
 		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
@@ -4961,9 +4674,9 @@ describe("InteractiveMode.showLoadedResources", () => {
 
 		const output = renderAll(fakeThis.chatContainer).replace(/\\/g, "/");
 		expect(output).toContain("[Context]");
-		expect(output).toContain("~/.pi/agent/AGENTS.md");
+		expect(output).toContain("~/.fulcrum/AGENTS.md");
 		expect(output).toContain("~/Development/pi-mono/AGENTS.md");
-		expect(output).not.toContain("~/.pi/agent/AGENTS.md, AGENTS.md");
+		expect(output).not.toContain("~/.fulcrum/AGENTS.md, AGENTS.md");
 	});
 
 	test("does not show verbose listing on quiet startup during reload", () => {

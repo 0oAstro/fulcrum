@@ -39,8 +39,8 @@ describe("ConfigurationMenuComponent", () => {
 			providerOptions: [
 				{ id: "anthropic", name: "Anthropic", authType: "oauth" },
 				{
-					id: "serper",
-					name: "Serper (web search)",
+					id: "firecrawl",
+					name: "Firecrawl (web search and browser)",
 					authType: "api_key",
 					category: "service",
 				},
@@ -85,7 +85,7 @@ describe("ConfigurationMenuComponent", () => {
 		expect(output).toContain("[  Models]");
 		expect(output).toContain("[  MCP Connections]");
 		expect(output).toContain("Anthropic");
-		expect(output).not.toContain("Serper (web search)");
+		expect(output).not.toContain("Firecrawl (web search and browser)");
 
 		menu.handleInput("a");
 		menu.setActiveTab("models");
@@ -106,7 +106,7 @@ describe("ConfigurationMenuComponent", () => {
 		menu.setActiveTab("mcp-connections");
 		output = stripAnsi(menu.render(120).join("\n"));
 		expect(output).toContain("[▶ MCP Connections]");
-		expect(output).toContain("Serper (web search)");
+		expect(output).toContain("Firecrawl (web search and browser)");
 		expect(output).not.toContain("Anthropic");
 	});
 
@@ -216,7 +216,7 @@ describe("ConfigurationMenuComponent", () => {
 	it("keeps the active marker visible across supported themes", async () => {
 		const menu = await createMenu();
 
-		for (const themeName of ["dark", "light", "prime"] as const) {
+		for (const themeName of ["dark", "light", "fulcrum"] as const) {
 			initTheme(themeName);
 			const rendered = menu.render(120).join("\n");
 			expect(stripAnsi(rendered)).toContain("[▶ Providers]");

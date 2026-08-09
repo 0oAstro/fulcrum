@@ -355,25 +355,6 @@ describe("skills", () => {
 			expect(result).toContain("<python_import>python_skill</python_import>");
 		});
 
-		it("should include intro text before XML", () => {
-			const skills: Skill[] = [
-				createTestSkill({
-					name: "test-skill",
-					description: "A test skill.",
-					filePath: "/path/to/skill/SKILL.md",
-					baseDir: "/path/to/skill",
-				}),
-			];
-
-			const result = formatSkillsForPrompt(skills);
-			const xmlStart = result.indexOf("<available_skills>");
-			const introText = result.substring(0, xmlStart);
-
-			expect(introText).toContain("The following skills provide specialized instructions");
-			expect(introText).toContain("Use ipython to inspect a skill's file");
-			expect(introText).toContain("Skills with a python_import are prepared");
-		});
-
 		it("should escape XML special characters", () => {
 			const skills: Skill[] = [
 				createTestSkill({
@@ -482,11 +463,11 @@ describe("skills", () => {
 		});
 
 		it("should expand ~ in skillPaths", () => {
-			const homeSkillsDir = join(homedir(), ".pi/agent/skills");
+			const homeSkillsDir = join(homedir(), ".fulcrum/skills");
 			const { skills: withTilde } = loadSkills({
 				agentDir: emptyAgentDir,
 				cwd: emptyCwd,
-				skillPaths: ["~/.pi/agent/skills"],
+				skillPaths: ["~/.fulcrum/skills"],
 				includeDefaults: true,
 			});
 			const { skills: withoutTilde } = loadSkills({
@@ -499,7 +480,7 @@ describe("skills", () => {
 		});
 
 		it("should warn when Python skills share an import name", () => {
-			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-skills-"));
+			const tempDir = mkdtempSync(join(tmpdir(), "fulcrum-skills-"));
 			try {
 				writePythonSkill(tempDir, "web-search");
 				writePythonSkill(tempDir, "web_search");

@@ -18,7 +18,7 @@ describe("agent connection snapshots", () => {
 						{
 							name: "commit",
 							description: "Commit changes",
-							filePath: "/workspace/project/.prime/skills/commit/SKILL.md",
+							filePath: "/workspace/project/.fulcrum/skills/commit/SKILL.md",
 						},
 					],
 					diagnostics: [],
@@ -52,8 +52,8 @@ describe("agent connection snapshots", () => {
 		});
 		expect(snapshot.skills[0]?.artifact).toMatchObject({
 			type: "skill",
-			logicalPath: ".prime/skills/commit/SKILL.md",
-			relativePath: ".prime/skills/commit/SKILL.md",
+			logicalPath: ".fulcrum/skills/commit/SKILL.md",
+			relativePath: ".fulcrum/skills/commit/SKILL.md",
 		});
 		expect(snapshot.extensions[0]).toMatchObject({
 			path: "/opt/prime/extensions/review/index.ts",

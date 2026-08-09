@@ -33,7 +33,6 @@ import {
 } from "../src/core/rlm-runtime.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager, type SettingsStorage } from "../src/core/settings-manager.js";
-import type { Skill } from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 import { type ActiveSessionState, resolveActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
@@ -2137,9 +2136,8 @@ describe("AgentSession rlm recursion", () => {
 	});
 
 	it("lets a stale kernel depth cap defer to the live host gate", () => {
-		const python =
-			process.env.PRIME_AGENT_KERNEL_PYTHON ?? join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
-		const runtime = join(process.cwd(), "..", "..", "prime-agent-runtime", "src");
+		const python = process.env.FULCRUM_KERNEL_PYTHON ?? join(homedir(), ".fulcrum", "kernel-venv", "bin", "python");
+		const runtime = join(process.cwd(), "..", "..", "fulcrum-runtime", "src");
 		const probe = spawnSync(
 			python,
 			["-c", "import asyncio, rlm; rlm.Comm = None; asyncio.run(rlm.run('raised live cap'))"],
@@ -3204,14 +3202,13 @@ describe("AgentSession RLM session dir", () => {
 	function createSession(
 		sessionManager: SessionManager,
 		agentDir?: string,
-		serperKey?: string,
-		loadWebsearchSkill = false,
+		firecrawlKey?: string,
 		rlmSessionDir?: string,
 	): AgentSession {
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		if (serperKey !== undefined) {
-			authStorage.set("serper", { type: "api_key", key: serperKey });
+		if (firecrawlKey !== undefined) {
+			authStorage.set("firecrawl", { type: "api_key", key: firecrawlKey });
 		}
 		const agent = new Agent({
 			convertToLlm,
@@ -3219,19 +3216,6 @@ describe("AgentSession RLM session dir", () => {
 			initialState: { model, systemPrompt: "", tools: [], thinkingLevel: "off" },
 			streamFn: () => streamAnswer("ignored"),
 		});
-		const skills: Skill[] = loadWebsearchSkill
-			? [
-					{
-						kind: "markdown",
-						name: "websearch",
-						description: "",
-						filePath: "/x/websearch/SKILL.md",
-						baseDir: "/x/websearch",
-						sourceInfo: createSyntheticSourceInfo("/x/websearch/SKILL.md", { source: "package" }),
-						disableModelInvocation: false,
-					},
-				]
-			: [];
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -3239,7 +3223,7 @@ describe("AgentSession RLM session dir", () => {
 			cwd: tempDir,
 			agentDir,
 			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models.json")),
-			resourceLoader: createTestResourceLoader({ skills }),
+			resourceLoader: createTestResourceLoader({ skills: [] }),
 			rlmSessionDir,
 		});
 		return session;
@@ -3249,7 +3233,7 @@ describe("AgentSession RLM session dir", () => {
 		const root = createSession(SessionManager.inMemory(tempDir));
 		const inspectable = root as unknown as InspectableRlmDirSession;
 
-		const before = readdirSync(tmpdir()).filter((name) => name.startsWith("prime-agent-rlm-"));
+		const before = readdirSync(tmpdir()).filter((name) => name.startsWith("fulcrum-rlm-"));
 
 		expect(inspectable._ensureRlmSessionDir()).toBeUndefined();
 		const env = inspectable._rlmKernelEnv();
@@ -3258,7 +3242,7 @@ describe("AgentSession RLM session dir", () => {
 		expect(env.RLM_GLOBAL_HARNESS_STATE_DIR).toBeDefined();
 		expect(env).toMatchObject({ RLM_DEPTH: "0" });
 
-		const after = readdirSync(tmpdir()).filter((name) => name.startsWith("prime-agent-rlm-"));
+		const after = readdirSync(tmpdir()).filter((name) => name.startsWith("fulcrum-rlm-"));
 		expect(after).toEqual(before);
 	});
 
@@ -3281,7 +3265,7 @@ describe("AgentSession RLM session dir", () => {
 		const subDir = join(tempDir, "parent-artifact", "sub-abc12345");
 		mkdirSync(subDir, { recursive: true });
 		const sessionManager = SessionManager.create(tempDir, subDir);
-		const root = createSession(sessionManager, undefined, undefined, false, subDir);
+		const root = createSession(sessionManager, undefined, undefined, subDir);
 		const inspectable = root as unknown as InspectableRlmDirSession;
 
 		const artifactDir = sessionManager.getSessionArtifactDir();
@@ -3295,7 +3279,7 @@ describe("AgentSession RLM session dir", () => {
 	it("falls back to the rlm session dir for RLM_HARNESS_STATE_DIR without an artifact dir", () => {
 		const ephemeralDir = join(tempDir, "ephemeral-rlm");
 		mkdirSync(ephemeralDir, { recursive: true });
-		const root = createSession(SessionManager.inMemory(tempDir), undefined, undefined, false, ephemeralDir);
+		const root = createSession(SessionManager.inMemory(tempDir), undefined, undefined, ephemeralDir);
 		const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
 		expect(env.RLM_SESSION_DIR).toBe(ephemeralDir);
 		expect(env.RLM_HARNESS_STATE_DIR).toBe(join(ephemeralDir, "harness"));
@@ -3334,7 +3318,7 @@ describe("AgentSession RLM session dir", () => {
 			}),
 			"utf8",
 		);
-		const root = createSession(SessionManager.inMemory(tempDir), undefined, undefined, false, ephemeralDir);
+		const root = createSession(SessionManager.inMemory(tempDir), undefined, undefined, ephemeralDir);
 
 		const prompt = root.systemPrompt;
 
@@ -3346,65 +3330,65 @@ describe("AgentSession RLM session dir", () => {
 		const agentDir = join(tempDir, "custom-agent-dir");
 		const root = createSession(SessionManager.inMemory(tempDir), agentDir);
 		const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
-		expect(env.PRIME_AGENT_CODING_AGENT_DIR).toBe(agentDir);
+		expect(env.FULCRUM_CODING_AGENT_DIR).toBe(agentDir);
 	});
 
 	it("omits the agentDir env var when none is configured", () => {
 		const root = createSession(SessionManager.inMemory(tempDir));
 		const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
-		expect(env.PRIME_AGENT_CODING_AGENT_DIR).toBeUndefined();
+		expect(env.FULCRUM_CODING_AGENT_DIR).toBeUndefined();
 	});
 
-	it("exports agentDir but skips key injection when no websearch skill is loaded", () => {
+	it("never exposes the stored Firecrawl key to the kernel environment", () => {
 		const agentDir = join(tempDir, "custom-agent-dir");
-		const root = createSession(SessionManager.inMemory(tempDir), agentDir, "stored-key", false);
+		const root = createSession(SessionManager.inMemory(tempDir), agentDir, "stored-key");
 		const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
-		expect(env.PRIME_AGENT_CODING_AGENT_DIR).toBe(agentDir);
-		expect(env.SERPER_API_KEY).toBeUndefined();
+		expect(env.FULCRUM_CODING_AGENT_DIR).toBe(agentDir);
+		expect(env.FIRECRAWL_API_KEY).toBeUndefined();
 	});
 
-	it("injects the key for a custom websearch skill even when bundled is off", () => {
-		const previous = process.env.SERPER_API_KEY;
-		delete process.env.SERPER_API_KEY;
+	it("uses a literal stored Firecrawl key only in the host request", async () => {
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ success: true, data: { web: [] } }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			}),
+		);
 		try {
-			// loadWebsearchSkill=true models a --skill/project websearch; the bundled
-			// setting is irrelevant because the gate checks the loaded skill, not settings.
-			const root = createSession(SessionManager.inMemory(tempDir), undefined, "custom-key", true);
-			const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
-			expect(env.SERPER_API_KEY).toBe("custom-key");
+			const root = createSession(SessionManager.inMemory(tempDir), undefined, "literal-firecrawl-key");
+			const search = (root as unknown as InspectableRlmSession)._createKernelHostHandlers()["websearch.search"];
+			await search({ query: "fulcrum" });
+			expect(fetchMock.mock.calls[0][1]?.headers).toEqual({
+				Authorization: "Bearer literal-firecrawl-key",
+				"Content-Type": "application/json",
+			});
+			expect((root as unknown as InspectableRlmDirSession)._rlmKernelEnv().FIRECRAWL_API_KEY).toBeUndefined();
 		} finally {
-			if (previous === undefined) delete process.env.SERPER_API_KEY;
-			else process.env.SERPER_API_KEY = previous;
+			fetchMock.mockRestore();
 		}
 	});
 
-	it("injects a literal stored Serper key into the kernel", () => {
-		const previous = process.env.SERPER_API_KEY;
-		delete process.env.SERPER_API_KEY;
+	it("resolves an env-var-reference Firecrawl key inside the host", async () => {
+		const previousRef = process.env.MY_FIRECRAWL_REF;
+		process.env.MY_FIRECRAWL_REF = "resolved-secret";
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ success: true, data: { web: [] } }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			}),
+		);
 		try {
-			const root = createSession(SessionManager.inMemory(tempDir), undefined, "literal-serper-key", true);
-			const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
-			expect(env.SERPER_API_KEY).toBe("literal-serper-key");
+			const root = createSession(SessionManager.inMemory(tempDir), undefined, "MY_FIRECRAWL_REF");
+			const search = (root as unknown as InspectableRlmSession)._createKernelHostHandlers()["websearch.search"];
+			await search({ query: "fulcrum" });
+			expect(fetchMock.mock.calls[0][1]?.headers).toEqual({
+				Authorization: "Bearer resolved-secret",
+				"Content-Type": "application/json",
+			});
 		} finally {
-			if (previous === undefined) delete process.env.SERPER_API_KEY;
-			else process.env.SERPER_API_KEY = previous;
-		}
-	});
-
-	it("resolves an env-var-reference Serper key before injecting it", () => {
-		const previousKey = process.env.SERPER_API_KEY;
-		const previousRef = process.env.MY_SERPER_REF;
-		delete process.env.SERPER_API_KEY;
-		process.env.MY_SERPER_REF = "resolved-secret";
-		try {
-			const root = createSession(SessionManager.inMemory(tempDir), undefined, "MY_SERPER_REF", true);
-			const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
-			expect(env.SERPER_API_KEY).toBe("resolved-secret");
-		} finally {
-			if (previousKey === undefined) delete process.env.SERPER_API_KEY;
-			else process.env.SERPER_API_KEY = previousKey;
-			if (previousRef === undefined) delete process.env.MY_SERPER_REF;
-			else process.env.MY_SERPER_REF = previousRef;
+			fetchMock.mockRestore();
+			if (previousRef === undefined) delete process.env.MY_FIRECRAWL_REF;
+			else process.env.MY_FIRECRAWL_REF = previousRef;
 		}
 	});
 });

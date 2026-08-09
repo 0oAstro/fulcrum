@@ -59,7 +59,14 @@ export const HOST_COMM_TARGET = "host.request";
  * Handles one typed request from Python code running in the kernel.
  * The returned record is sent back verbatim as the comm reply payload.
  */
-export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+export interface HostRequestContext {
+	signal?: AbortSignal;
+}
+
+export type HostRequestHandler = (
+	payload: Record<string, unknown>,
+	context?: HostRequestContext,
+) => Promise<Record<string, unknown>>;
 
 /** Host request handlers keyed by request type (e.g. "rlm.run", "goal.complete"). */
 export type HostRequestHandlers = Record<string, HostRequestHandler>;
@@ -86,7 +93,7 @@ export interface KernelManagerOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
 	snapshot?: KernelSnapshotConfig;
-	/** Default: "prime-agent". */
+	/** Default: "fulcrum". */
 	username?: string;
 }
 
@@ -107,13 +114,13 @@ export interface ExecuteOptions {
 }
 
 /** MIME tag the `edit` skill emits diff payloads under, via `display_data`. */
-export const DIFF_DISPLAY_MIME = "application/vnd.prime-agent.diff+json";
+export const DIFF_DISPLAY_MIME = "application/vnd.fulcrum.diff+json";
 
 /** MIME tag the `attach-image` skill emits media payloads under, via `display_data`. */
-export const ATTACHMENT_DISPLAY_MIME = "application/vnd.prime-agent.attachment+json";
+export const ATTACHMENT_DISPLAY_MIME = "application/vnd.fulcrum.attachment+json";
 
 /** MIME tag the `agent-message` skill emits after sending a message. */
-export const AGENT_MESSAGE_DISPLAY_MIME = "application/vnd.prime-agent.agent-message+json";
+export const AGENT_MESSAGE_DISPLAY_MIME = "application/vnd.fulcrum.agent-message+json";
 
 /**
  * Hard ceiling on a single attachment's base64 payload, a defensive guard
@@ -461,7 +468,7 @@ function makeConnection(): { info: ConnectionInfo; path: string; tempDir: string
 		key: randomBytes(16).toString("hex"),
 		kernel_name: "python3",
 	};
-	const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-kernel-"));
+	const tempDir = mkdtempSync(join(tmpdir(), "fulcrum-kernel-"));
 	const path = join(tempDir, "connection.json");
 	writeFileSync(path, JSON.stringify(info, null, 2), { mode: 0o600 });
 	return { info, path, tempDir };
@@ -555,7 +562,7 @@ export class KernelManager {
 			hostHandlers: options.hostHandlers,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
-			username: options.username ?? "prime-agent",
+			username: options.username ?? "fulcrum",
 		};
 	}
 
@@ -1267,7 +1274,7 @@ export class KernelManager {
 		// the in-flight execution; detached spawns (asyncio.create_task) fire after
 		// the scheduling cell goes idle, so fall back to that last cell's source.
 		const cellSourceCode = this.activeExecution?.code ?? this.lastCellCode;
-		return handler({ ...data, cellSourceCode });
+		return handler({ ...data, cellSourceCode }, { signal: this.activeExecution?.opts.signal });
 	}
 
 	private async sendCommMessage(commId: string, data: Record<string, unknown>): Promise<void> {

@@ -1,15 +1,15 @@
 # Extension Examples
 
-Example extensions for Prime Agent.
+Example extensions for Fulcrum.
 
 ## Usage
 
 ```bash
 # From the repository root, load an extension with --extension
-./prime-agent.sh --extension packages/coding-agent/examples/extensions/permission-gate.ts
+./fulcrum.sh --extension packages/coding-agent/examples/extensions/permission-gate.ts
 
 # Or copy to extensions directory for auto-discovery
-cp permission-gate.ts ~/.prime/agent/extensions/
+cp permission-gate.ts ~/.fulcrum/extensions/
 ```
 
 ## Examples
@@ -96,7 +96,7 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 
 | Extension | Description |
 |-----------|-------------|
-| `mac-system-theme.ts` | Syncs the Prime Agent theme with macOS dark/light mode |
+| `mac-system-theme.ts` | Syncs the Fulcrum theme with macOS dark/light mode |
 
 ### Resources
 

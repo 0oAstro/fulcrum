@@ -1,9 +1,8 @@
 import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { type AuthStatus, AuthStorage } from "../src/core/auth-storage.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
-import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../src/core/provider-display-names.js";
 import { isApiKeyLoginProvider } from "../src/modes/interactive/auth-flows.js";
 import {
@@ -58,42 +57,6 @@ describe("OAuthSelectorComponent", () => {
 			"api_key:Anthropic",
 			"api_key:OpenAI",
 		]);
-	});
-
-	it("sorts Prime Inference first within every login auth-state group", () => {
-		const cases: Array<{ status: AuthStatus; configuredProviderLeads: boolean }> = [
-			{ status: { configured: true, source: "environment" }, configuredProviderLeads: false },
-			{ status: { configured: false, source: "stale", label: "expired" }, configuredProviderLeads: true },
-			{ status: { configured: false }, configuredProviderLeads: true },
-		];
-
-		for (const { status, configuredProviderLeads } of cases) {
-			const selector = new OAuthSelectorComponent(
-				"login",
-				AuthStorage.inMemory(),
-				[
-					{ id: "anthropic", name: "Anthropic", authType: "api_key" },
-					{ id: PRIME_INFERENCE_PROVIDER_ID, name: "Prime Inference", authType: "api_key" },
-					{ id: "openai", name: "OpenAI", authType: "api_key" },
-				],
-				() => {},
-				() => {},
-				(providerId) =>
-					providerId === "openai" ? { configured: true, source: "environment", label: "OPENAI_API_KEY" } : status,
-			);
-
-			const output = stripAnsi(selector.render(120).join("\n"));
-			const primeIndex = output.indexOf("Prime Inference");
-			const anthropicIndex = output.indexOf("Anthropic");
-			const openAiIndex = output.indexOf("OpenAI");
-
-			expect(primeIndex).toBeLessThan(anthropicIndex);
-			if (configuredProviderLeads) {
-				expect(openAiIndex).toBeLessThan(primeIndex);
-			} else {
-				expect(primeIndex).toBeLessThan(openAiIndex);
-			}
-		}
 	});
 
 	it("preserves auth type when selecting duplicate provider ids", () => {
@@ -236,19 +199,19 @@ describe("OAuthSelectorComponent", () => {
 	it("sorts stale auth ahead of unconfigured providers", () => {
 		process.env.OPENAI_API_KEY = "test-openai-key";
 		const authStorage = AuthStorage.inMemory({
-			"prime-inference": {
+			xai: {
 				type: "api_key",
-				key: "stale-prime-key",
+				key: "stale-xai-key",
 			},
 		});
-		authStorage.markAuthStale("prime-inference");
+		authStorage.markAuthStale("xai");
 		const selector = new OAuthSelectorComponent(
 			"login",
 			authStorage,
 			[
 				{ id: "github-copilot", name: "GitHub Copilot", authType: "oauth" },
 				{ id: "amazon-bedrock", name: "Amazon Bedrock", authType: "api_key" },
-				{ id: "prime-inference", name: "Prime Inference", authType: "api_key" },
+				{ id: "xai", name: "xAI", authType: "api_key" },
 				{ id: "openai", name: "OpenAI", authType: "api_key" },
 			],
 			() => {},
@@ -257,9 +220,9 @@ describe("OAuthSelectorComponent", () => {
 
 		const output = stripAnsi(selector.render(120).join("\n"));
 
-		expect(output.indexOf("OpenAI")).toBeLessThan(output.indexOf("Prime Inference"));
-		expect(output.indexOf("Prime Inference")).toBeLessThan(output.indexOf("GitHub Copilot"));
-		expect(output.indexOf("Prime Inference")).toBeLessThan(output.indexOf("Amazon Bedrock"));
+		expect(output.indexOf("OpenAI")).toBeLessThan(output.indexOf("xAI"));
+		expect(output.indexOf("xAI")).toBeLessThan(output.indexOf("GitHub Copilot"));
+		expect(output.indexOf("xAI")).toBeLessThan(output.indexOf("Amazon Bedrock"));
 		expect(output).toContain("expired");
 	});
 
@@ -404,7 +367,7 @@ describe("OAuthSelectorComponent", () => {
 			AuthStorage.inMemory(),
 			[
 				{ id: "anthropic", name: "Anthropic", authType: "oauth", category: "provider" },
-				{ id: "serper", name: "Serper (web search)", authType: "api_key", category: "service" },
+				{ id: "firecrawl", name: "Firecrawl (web search and browser)", authType: "api_key", category: "service" },
 			],
 			() => {},
 			() => {},
@@ -415,12 +378,12 @@ describe("OAuthSelectorComponent", () => {
 		expect(output).toContain("Providers");
 		expect(output).toContain("MCP Connections");
 		expect(output).toContain("Anthropic");
-		expect(output).not.toContain("Serper");
+		expect(output).not.toContain("Firecrawl");
 
 		// Right arrow switches to the MCP Connections tab.
 		selector.handleInput("\x1b[C");
 		output = stripAnsi(selector.render(120).join("\n"));
-		expect(output).toContain("Serper (web search)");
+		expect(output).toContain("Firecrawl (web search and browser)");
 		expect(output).not.toContain("Anthropic");
 	});
 
@@ -431,7 +394,7 @@ describe("OAuthSelectorComponent", () => {
 			AuthStorage.inMemory(),
 			[
 				{ id: "anthropic", name: "Anthropic", authType: "oauth", category: "provider" },
-				{ id: "serper", name: "Serper (web search)", authType: "api_key", category: "service" },
+				{ id: "firecrawl", name: "Firecrawl (web search and browser)", authType: "api_key", category: "service" },
 			],
 			(provider) => {
 				chosen = provider.id;
@@ -441,7 +404,7 @@ describe("OAuthSelectorComponent", () => {
 
 		selector.handleInput("\x1b[C"); // -> MCP Connections tab
 		selector.handleInput("\r"); // confirm
-		expect(chosen).toBe("serper");
+		expect(chosen).toBe("firecrawl");
 	});
 
 	it("can open with the MCP Connections tab active", () => {
@@ -450,7 +413,7 @@ describe("OAuthSelectorComponent", () => {
 			AuthStorage.inMemory(),
 			[
 				{ id: "anthropic", name: "Anthropic", authType: "oauth", category: "provider" },
-				{ id: "serper", name: "Serper (web search)", authType: "api_key", category: "service" },
+				{ id: "firecrawl", name: "Firecrawl (web search and browser)", authType: "api_key", category: "service" },
 			],
 			() => {},
 			() => {},
@@ -459,7 +422,7 @@ describe("OAuthSelectorComponent", () => {
 		);
 
 		const output = stripAnsi(selector.render(120).join("\n"));
-		expect(output).toContain("Serper (web search)");
+		expect(output).toContain("Firecrawl (web search and browser)");
 		expect(output).not.toContain("Anthropic");
 	});
 

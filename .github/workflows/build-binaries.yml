@@ -1,4 +1,4 @@
-name: Release Prime Agent
+name: Release Fulcrum
 
 on:
   push:
@@ -14,7 +14,7 @@ on:
         type: string
 
 concurrency:
-  group: release-prime-agent
+  group: release-fulcrum
   cancel-in-progress: false
   queue: max
 
@@ -126,6 +126,7 @@ jobs:
       PRODUCTION_VERSION: ${{ needs.release-context.outputs.production_version }}
       PUBLISH_BETA: ${{ needs.release-context.outputs.publish_beta }}
       PUBLISH_PRODUCTION: ${{ needs.release-context.outputs.publish_production }}
+      GITHUB_RELEASE_DOWNLOAD_BASE_URL: https://github.com/${{ github.repository }}/releases/download
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -150,33 +151,29 @@ jobs:
 
       - name: Pack production release
         if: env.PUBLISH_PRODUCTION == 'true'
-        env:
-          PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
         run: |
-          test -n "$PRIME_AGENT_DOWNLOAD_BASE_URL"
           npm run release:pack -- \
             --channel stable \
             --version "$PRODUCTION_VERSION" \
-            --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
+            --base-url "$GITHUB_RELEASE_DOWNLOAD_BASE_URL" \
+            --tarball-url-template "$GITHUB_RELEASE_DOWNLOAD_BASE_URL/{tag}/{file}" \
             --out-dir packages/coding-agent/release/production
 
       - name: Pack beta release
         if: env.PUBLISH_BETA == 'true'
-        env:
-          PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
         run: |
-          test -n "$PRIME_AGENT_DOWNLOAD_BASE_URL"
           npm run release:pack -- \
             --channel beta \
             --version "$BETA_VERSION" \
-            --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
+            --base-url "$GITHUB_RELEASE_DOWNLOAD_BASE_URL" \
+            --tarball-url-template "$GITHUB_RELEASE_DOWNLOAD_BASE_URL/beta/{file}" \
             --out-dir packages/coding-agent/release/beta
 
       - name: Upload production artifacts
         if: env.PUBLISH_PRODUCTION == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: prime-agent-production
+          name: fulcrum-production
           path: packages/coding-agent/release/production/artifacts/*
           if-no-files-found: error
 
@@ -184,7 +181,7 @@ jobs:
         if: env.PUBLISH_BETA == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: prime-agent-beta
+          name: fulcrum-beta
           path: packages/coding-agent/release/beta/artifacts/*
           if-no-files-found: error
 
@@ -194,17 +191,11 @@ jobs:
     permissions:
       contents: write
     env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_DEFAULT_REGION: auto
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       BETA_VERSION: ${{ needs.release-context.outputs.beta_version }}
       BUILD_REF: ${{ needs.release-context.outputs.build_ref }}
       PRODUCTION_VERSION: ${{ needs.release-context.outputs.production_version }}
       PUBLISH_BETA: ${{ needs.release-context.outputs.publish_beta }}
       PUBLISH_PRODUCTION: ${{ needs.release-context.outputs.publish_production }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
-      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -216,137 +207,34 @@ jobs:
         if: env.PUBLISH_PRODUCTION == 'true'
         uses: actions/download-artifact@v8
         with:
-          name: prime-agent-production
+          name: fulcrum-production
           path: release-artifacts/production
 
       - name: Download beta artifacts
         if: env.PUBLISH_BETA == 'true'
         uses: actions/download-artifact@v8
         with:
-          name: prime-agent-beta
+          name: fulcrum-beta
           path: release-artifacts/beta
 
-      - name: Prepare installer
-        run: |
-          INSTALL_BASE_URL="${R2_PUBLIC_BASE_URL%/}"
-          export INSTALL_BASE_URL
-          test -n "$INSTALL_BASE_URL"
-
-          node - <<'NODE'
-          const fs = require("node:fs");
-          const baseUrl = process.env.INSTALL_BASE_URL;
-          if (!baseUrl) throw new Error("INSTALL_BASE_URL is required");
-          const installer = fs.readFileSync("install.sh", "utf8");
-          const renderInstaller = (channel) => installer
-            .replaceAll("__PRIME_AGENT_DOWNLOAD_BASE_URL__", baseUrl)
-            .replaceAll("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__", channel);
-          fs.writeFileSync("/tmp/prime-agent-install.sh", renderInstaller("stable"));
-          fs.writeFileSync("/tmp/prime-agent-install-beta.sh", renderInstaller("beta"));
-          NODE
-
-      - name: Extract production release notes
-        if: env.PUBLISH_PRODUCTION == 'true'
-        run: |
-          awk "/^## \[${PRODUCTION_VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" packages/coding-agent/CHANGELOG.md > /tmp/release-notes.md
-          if [ ! -s /tmp/release-notes.md ]; then
-            echo "Release v${PRODUCTION_VERSION}" > /tmp/release-notes.md
-          fi
-
-      - name: Publish production channel to R2
-        if: env.PUBLISH_PRODUCTION == 'true'
-        run: |
-          PRODUCTION_DIR=release-artifacts/production
-          RELEASE_PREFIX="releases/v${PRODUCTION_VERSION}"
-          TARBALL="$PRODUCTION_DIR/prime-agent-${PRODUCTION_VERSION}.tgz"
-
-          test -f "$TARBALL"
-          test -f "$PRODUCTION_DIR/SHA256SUMS"
-          test -f "$PRODUCTION_DIR/stable"
-          test -f "$PRODUCTION_DIR/latest.json"
-          test -n "$R2_BUCKET"
-          test -n "$R2_ENDPOINT_URL"
-
-          for artifact in "$PRODUCTION_DIR"/*.tgz; do
-            aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
-              --endpoint-url "$R2_ENDPOINT_URL" \
-              --content-type application/gzip \
-              --cache-control 'public, max-age=31536000, immutable'
-          done
-
-          aws s3 cp "$PRODUCTION_DIR/SHA256SUMS" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/SHA256SUMS" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/plain \
-            --cache-control 'public, max-age=31536000, immutable'
-
-          aws s3 cp "$PRODUCTION_DIR/latest.json" "s3://${R2_BUCKET}/latest.json" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type application/json \
-            --cache-control no-cache
-
-          aws s3 cp "$PRODUCTION_DIR/stable" "s3://${R2_BUCKET}/stable" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/plain \
-            --cache-control no-cache
-
-          aws s3 cp /tmp/prime-agent-install.sh "s3://${R2_BUCKET}/install.sh" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/x-shellscript \
-            --cache-control no-cache
-
-          aws s3 cp /tmp/prime-agent-install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/x-shellscript \
-            --cache-control no-cache
-
-      - name: Create production GitHub release
+      - name: Publish production GitHub release
         if: env.PUBLISH_PRODUCTION == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_TAG="v${PRODUCTION_VERSION}"
           PRODUCTION_DIR=release-artifacts/production
-          target_args=()
-          if [ "$BUILD_REF" != "$RELEASE_TAG" ]; then
-            target_args=(--target "$BUILD_REF")
-          fi
-
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "$PRODUCTION_DIR"/* --clobber
           else
             gh release create "$RELEASE_TAG" \
               --title "$RELEASE_TAG" \
-              "${target_args[@]}" \
-              --notes-file /tmp/release-notes.md \
+              --target "$BUILD_REF" \
+              --notes "Fulcrum release v${PRODUCTION_VERSION}." \
               "$PRODUCTION_DIR"/*
           fi
 
-      - name: Publish immutable beta artifacts to R2
-        if: env.PUBLISH_BETA == 'true'
-        run: |
-          BETA_DIR=release-artifacts/beta
-          RELEASE_PREFIX="releases/v${BETA_VERSION}"
-          TARBALL="$BETA_DIR/prime-agent-${BETA_VERSION}.tgz"
-
-          test -f "$TARBALL"
-          test -f "$BETA_DIR/SHA256SUMS"
-          test -f "$BETA_DIR/beta"
-          test -f "$BETA_DIR/beta.json"
-          test -n "$R2_BUCKET"
-          test -n "$R2_ENDPOINT_URL"
-
-          for artifact in "$BETA_DIR"/*.tgz; do
-            aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
-              --endpoint-url "$R2_ENDPOINT_URL" \
-              --content-type application/gzip \
-              --cache-control 'public, max-age=31536000, immutable'
-          done
-
-          aws s3 cp "$BETA_DIR/SHA256SUMS" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/SHA256SUMS" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/plain \
-            --cache-control 'public, max-age=31536000, immutable'
-
-      - name: Advance beta release
+      - name: Publish beta GitHub release
         if: env.PUBLISH_BETA == 'true'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -354,59 +242,17 @@ jobs:
         run: |
           latest_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${DEFAULT_BRANCH}" --jq .sha)
           if [ "$latest_main_sha" != "$BUILD_REF" ]; then
-            echo "A newer main commit exists; keeping its beta pointers in place."
+            echo "A newer main commit exists; keeping its beta release in place."
             exit 0
           fi
 
           BETA_DIR=release-artifacts/beta
-          aws s3 cp "$BETA_DIR/beta.json" "s3://${R2_BUCKET}/beta.json" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type application/json \
-            --cache-control no-cache
-
-          aws s3 cp "$BETA_DIR/beta" "s3://${R2_BUCKET}/beta" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/plain \
-            --cache-control no-cache
-
-          aws s3 cp /tmp/prime-agent-install.sh "s3://${R2_BUCKET}/install.sh" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/x-shellscript \
-            --cache-control no-cache
-
-          aws s3 cp /tmp/prime-agent-install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/x-shellscript \
-            --cache-control no-cache
-
-          printf 'Automated beta build from `%s` (`%s`).\n' "$DEFAULT_BRANCH" "$BUILD_REF" > /tmp/beta-release-notes.md
-
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/beta" >/dev/null 2>&1; then
-            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/beta" \
-              -F sha="$BUILD_REF" \
-              -F force=true >/dev/null
-          else
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref=refs/tags/beta \
-              -f sha="$BUILD_REF" >/dev/null
+          if gh release view beta >/dev/null 2>&1; then
+            gh release delete beta --yes --cleanup-tag
           fi
-
-          if release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/beta" --jq .id 2>/dev/null); then
-            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" --jq '.[].id' | while read -r asset_id; do
-              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
-            done
-            gh release edit beta \
-              --title "Beta (v${BETA_VERSION})" \
-              --target "$BUILD_REF" \
-              --notes-file /tmp/beta-release-notes.md \
-              --prerelease
-          else
-            gh release create beta \
-              --title "Beta (v${BETA_VERSION})" \
-              --target "$BUILD_REF" \
-              --notes-file /tmp/beta-release-notes.md \
-              --prerelease
-          fi
-
-          gh release upload beta "$BETA_DIR"/* --clobber
-          echo "Beta installer: ${R2_PUBLIC_BASE_URL%/}/install-beta.sh"
+          gh release create beta \
+            --title "Beta (v${BETA_VERSION})" \
+            --target "$BUILD_REF" \
+            --prerelease \
+            --notes "Automated beta build from ${DEFAULT_BRANCH} (${BUILD_REF})." \
+            "$BETA_DIR"/*

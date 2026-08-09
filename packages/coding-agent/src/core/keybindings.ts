@@ -17,6 +17,9 @@ export interface AppKeybindings {
 	"app.shortcuts": true;
 	"app.exit": true;
 	"app.suspend": true;
+	"app.thinking.cycle": true;
+	"app.model.cycleForward": true;
+	"app.model.cycleBackward": true;
 	"app.model.select": true;
 	"app.model.toggleScope": true;
 	"app.configuration.previousTab": true;
@@ -78,6 +81,9 @@ export const KEYBINDINGS = {
 		defaultKeys: process.platform === "win32" ? [] : "ctrl+z",
 		description: "Suspend to background",
 	},
+	"app.thinking.cycle": { defaultKeys: "shift+tab", description: "Cycle thinking level" },
+	"app.model.cycleForward": { defaultKeys: "ctrl+p", description: "Cycle to next model" },
+	"app.model.cycleBackward": { defaultKeys: "ctrl+shift+p", description: "Cycle to previous model" },
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.model.toggleScope": { defaultKeys: "alt+s", description: "Toggle model selector scope" },
 	"app.configuration.previousTab": { defaultKeys: "shift+tab", description: "Select previous configuration tab" },

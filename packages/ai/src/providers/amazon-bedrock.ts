@@ -21,6 +21,7 @@ import {
 	ToolResultStatus,
 } from "@aws-sdk/client-bedrock-runtime";
 import type { DocumentType } from "@smithy/types";
+import { getAwsEnvironmentValue, getAwsProfileConfig, waitForEnvApiKeysReady } from "../env-api-keys.js";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
 	Api,
@@ -93,6 +94,8 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
+		await waitForEnvApiKeysReady();
+
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
@@ -116,8 +119,12 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		const config: BedrockRuntimeClientConfig = {
 			profile: options.profile,
 		};
-		const configuredRegion = getConfiguredBedrockRegion(options);
-		const hasConfiguredProfile = hasConfiguredBedrockProfile();
+		const sharedProfile = getAwsProfileConfig(options.profile);
+		const configuredRegion = getConfiguredBedrockRegion(options, sharedProfile?.region);
+		const hasConfiguredProfile = hasConfiguredBedrockProfile(options, sharedProfile);
+		const endpointOverride =
+			getAwsEnvironmentValue("AWS_ENDPOINT_URL_BEDROCK_RUNTIME") ||
+			getAwsEnvironmentValue("AWS_ENDPOINT_URL_BEDROCK");
 		const endpointRegion = getStandardBedrockEndpointRegion(model.baseUrl);
 		const useExplicitEndpoint = shouldUseExplicitBedrockEndpoint(
 			model.baseUrl,
@@ -128,7 +135,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		// Only pin standard AWS Bedrock runtime endpoints when no region/profile is configured.
 		// This preserves custom endpoints (VPC/proxy) from #3402 without forcing built-in
 		// catalog defaults such as us-east-1 to override AWS_REGION/AWS_PROFILE.
-		if (useExplicitEndpoint) {
+		if (endpointOverride) {
+			config.endpoint = endpointOverride;
+		} else if (useExplicitEndpoint) {
 			config.endpoint = model.baseUrl;
 		}
 
@@ -138,11 +147,15 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 		// in Node.js/Bun environment only
 		if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
-			// Region resolution: explicit option > env vars > SDK default chain.
-			// When AWS_PROFILE is set, we leave region undefined so the SDK can
-			// resovle it from aws profile configs. Otherwise fall back to us-east-1.
+			// Region resolution: explicit option/env, then shared profile config,
+			// then the model endpoint/default. When a profile is selected, leave
+			// the endpoint unset so the SDK can apply its normal profile chain.
 			if (configuredRegion) {
 				config.region = configuredRegion;
+			} else if (endpointRegion && sharedProfile?.hasProfile) {
+				// A valid shared profile without a region can still use the model's
+				// standard endpoint region as a deterministic SDK region fallback.
+				config.region = endpointRegion;
 			} else if (endpointRegion && useExplicitEndpoint) {
 				config.region = endpointRegion;
 			} else if (!hasConfiguredProfile) {
@@ -851,20 +864,20 @@ function mapStopReason(reason: string | undefined): StopReason {
 	}
 }
 
-function getConfiguredBedrockRegion(options: BedrockOptions): string | undefined {
-	if (typeof process === "undefined") {
-		return options.region;
-	}
-
-	return options.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || undefined;
+function getConfiguredBedrockRegion(options: BedrockOptions, sharedProfileRegion?: string): string | undefined {
+	return (
+		options.region ||
+		getAwsEnvironmentValue("AWS_REGION") ||
+		getAwsEnvironmentValue("AWS_DEFAULT_REGION") ||
+		sharedProfileRegion
+	);
 }
 
-function hasConfiguredBedrockProfile(): boolean {
-	if (typeof process === "undefined") {
-		return false;
-	}
-
-	return Boolean(process.env.AWS_PROFILE);
+function hasConfiguredBedrockProfile(
+	options: BedrockOptions,
+	sharedProfile: ReturnType<typeof getAwsProfileConfig>,
+): boolean {
+	return Boolean(options.profile || getAwsEnvironmentValue("AWS_PROFILE") || sharedProfile?.hasProfile);
 }
 
 function getStandardBedrockEndpointRegion(baseUrl: string | undefined): string | undefined {

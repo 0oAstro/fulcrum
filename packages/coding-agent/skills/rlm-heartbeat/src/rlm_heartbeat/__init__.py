@@ -1,8 +1,8 @@
-"""Prime Agent RLM heartbeat skill: internal recurring session checks.
+"""Fulcrum RLM heartbeat skill: internal recurring session checks.
 
 All heartbeat state lives in the TypeScript host; these functions are thin
 typed wrappers over the generic host bridge (`rlm.host_request`). They only
-work inside the Prime Agent IPython kernel.
+work inside the Fulcrum IPython kernel.
 """
 
 from __future__ import annotations

@@ -1,12 +1,12 @@
 # Keybindings
 
-All keyboard shortcuts can be customized via `~/.prime/agent/keybindings.json`. Each action can be bound to one or more keys.
+All keyboard shortcuts can be customized via `~/.fulcrum/keybindings.json`. Each action can be bound to one or more keys.
 
-The config file uses the same namespaced keybinding ids that Prime Agent uses internally and that extension authors use in `keyHint()` and injected `keybindings` managers.
+The config file uses the same namespaced keybinding ids that Fulcrum uses internally and that extension authors use in `keyHint()` and injected `keybindings` managers.
 
 Older configs using pre-namespaced ids such as `cursorUp` or `expandTools` are migrated automatically to the namespaced ids on startup.
 
-After editing `keybindings.json`, run `/reload` in Prime Agent to apply the changes without restarting the session.
+After editing `keybindings.json`, run `/reload` in Fulcrum to apply the changes without restarting the session.
 
 ## Key Format
 
@@ -113,12 +113,17 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.model.select` | `ctrl+l` | Open model selector |
+| `app.model.cycleForward` | `ctrl+p` | Cycle to next model |
+| `app.model.cycleBackward` | `ctrl+shift+p` | Cycle to previous model |
 | `app.model.toggleScope` | `alt+s` | Toggle between all and scoped models |
+| `app.thinking.cycle` | `shift+tab` | Cycle thinking level |
 | `app.thinking.toggle` | `ctrl+t` | Collapse or expand thinking blocks |
+
+In the chat editor, these application shortcuts take precedence over editor bindings, so Ctrl+P cycles models rather than moving the cursor up. To retain Ctrl+P for editor input, disable or rebind `app.model.cycleForward` in `keybindings.json`.
 
 ### Configuration Menu
 
-Use `tab` to cycle forward and `shift+tab` to cycle backward through Providers, Models, and MCP Connections. Use `escape` to close the menu. Left and right move the cursor in the active search field.
+Use `tab` to cycle forward and `shift+tab` to cycle backward through Providers, Models, and MCP Connections. Use `escape` to close the menu. Left and right move the cursor in the active search field. When the main editor has focus, `shift+tab` cycles the reasoning level instead.
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
@@ -163,11 +168,11 @@ Used inside the scoped models selector (opened via `/scoped-models`).
 
 ## Custom Configuration
 
-Create `~/.prime/agent/keybindings.json`:
+Create `~/.fulcrum/keybindings.json`:
 
 ```json
 {
-  "tui.editor.cursorUp": ["up", "ctrl+p"],
+  "tui.editor.cursorUp": ["up", "alt+up"],
   "tui.editor.cursorDown": ["down", "ctrl+n"],
   "tui.editor.deleteWordBackward": ["ctrl+w", "alt+backspace"]
 }
@@ -175,12 +180,13 @@ Create `~/.prime/agent/keybindings.json`:
 
 Each action can have a single key or an array of keys. User config overrides defaults.
 
-On native Windows, `app.suspend` has no default binding because Windows terminals do not support Unix job control. If you bind it manually, Prime Agent shows a status message instead of suspending. In WSL, the normal Linux `ctrl+z`/`fg` behavior still applies.
+On native Windows, `app.suspend` has no default binding because Windows terminals do not support Unix job control. If you bind it manually, Fulcrum shows a status message instead of suspending. In WSL, the normal Linux `ctrl+z`/`fg` behavior still applies.
 
 ### Emacs Example
 
 ```json
 {
+  "app.model.cycleForward": [],
   "tui.editor.cursorUp": ["up", "ctrl+p"],
   "tui.editor.cursorDown": ["down", "ctrl+n"],
   "tui.editor.cursorLeft": ["left", "ctrl+b"],

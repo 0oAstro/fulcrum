@@ -1,14 +1,7 @@
 import type { Component } from "@earendil-works/pi-tui";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.js";
 
-/**
- * Footer component for the prime brand TUI.
- *
- * Renders nothing by default — token counters, cost, model name, cwd, and context %
- * are intentionally hidden. The setters and invalidate/dispose hooks are kept so the
- * existing call sites in interactive-mode keep working without modification, and so
- * `/usage` can expose telemetry without re-plumbing.
- */
+/** Empty footer that preserves the component contract used by interactive mode. */
 export class FooterComponent implements Component {
 	constructor(private footerData: ReadonlyFooterDataProvider) {
 		void this.footerData;
@@ -35,8 +28,6 @@ export class FooterComponent implements Component {
 	}
 
 	render(_width: number): string[] {
-		// Footer is intentionally empty in the prime brand TUI. Telemetry (cost, tokens, model,
-		// cwd, context %) is hidden by default; bring it back via /usage when needed.
 		return [];
 	}
 }

@@ -500,7 +500,7 @@ class FakeDaemonClient {
 
 	async connect(): Promise<void> {
 		if (this.connected) {
-			throw new Error("Prime Agent daemon client is already connected");
+			throw new Error("Fulcrum daemon client is already connected");
 		}
 		this.reconnectCount++;
 		if (this.reconnectError) {
@@ -548,7 +548,7 @@ class FakeDaemonClient {
 	disconnectForReconnect(reason: "shutdown" | "update"): void {
 		this.closeCount++;
 		this.connected = false;
-		this.emitClose(new DaemonSocketClosedError("/tmp/prime-agent.sock", reason));
+		this.emitClose(new DaemonSocketClosedError("/tmp/fulcrum.sock", reason));
 	}
 }
 
@@ -696,21 +696,6 @@ function emitSequencedQueueUpdate(client: FakeDaemonClient, activeSessionId: str
 }
 
 describe("DaemonAgentConnection", () => {
-	it("carries an opt-out-only telemetry policy on attach", async () => {
-		const fakeClient = new FakeDaemonClient();
-		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
-			telemetryDisabled: true,
-		});
-
-		await connection.attach();
-
-		expect(fakeClient.requests[0]).toMatchObject({
-			type: "attach",
-			activeSessionId: "active-1",
-			telemetryDisabled: true,
-		});
-	});
-
 	it("forwards queueIfBusy for prompt admission", async () => {
 		const fakeClient = new FakeDaemonClient();
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
@@ -966,7 +951,7 @@ describe("DaemonAgentConnection", () => {
 		await expect(connection.listHeartbeats()).resolves.toEqual([]);
 		expect(fakeClient.requests).toEqual([]);
 		await expect(connection.manageHeartbeat("active-original", "job-1", "pause")).rejects.toThrow(
-			"requires a newer Prime Agent daemon",
+			"requires a newer Fulcrum daemon",
 		);
 		expect(fakeClient.requests).toEqual([]);
 	});
@@ -1064,7 +1049,7 @@ describe("DaemonAgentConnection", () => {
 		});
 		await connection.attach();
 
-		fakeClient.emitClose(new DaemonSocketClosedError("/tmp/prime-agent.sock", "update"));
+		fakeClient.emitClose(new DaemonSocketClosedError("/tmp/fulcrum.sock", "update"));
 
 		await expect(restored).resolves.toMatchObject({
 			type: "session_resynced",
@@ -1166,7 +1151,7 @@ describe("DaemonAgentConnection", () => {
 		expect(closedEvents).toHaveLength(1);
 		expect(closedEvents[0]).toMatchObject({
 			type: "closed",
-			error: expect.stringContaining("The Prime Agent daemon shut down while this window was attached."),
+			error: expect.stringContaining("The Fulcrum daemon shut down while this window was attached."),
 		});
 		const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
 		expect(closedError).toContain("Session ID: session-current.");
@@ -1185,13 +1170,13 @@ describe("DaemonAgentConnection", () => {
 		});
 		await connection.attach();
 
-		fakeClient.emitClose(new DaemonSocketClosedError("/tmp/prime-agent.sock", "shutdown"));
+		fakeClient.emitClose(new DaemonSocketClosedError("/tmp/fulcrum.sock", "shutdown"));
 		await Promise.resolve();
 
 		expect(fakeClient.reconnectCount).toBe(0);
 		expect(closedEvents).toHaveLength(1);
 		const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
-		expect(closedError).toContain("The Prime Agent daemon shut down while this window was attached.");
+		expect(closedError).toContain("The Fulcrum daemon shut down while this window was attached.");
 	});
 
 	it.each([
@@ -1235,8 +1220,8 @@ describe("DaemonAgentConnection", () => {
 
 		expect(closedEvents).toHaveLength(1);
 		const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
-		expect(closedError).toContain("Lost connection to the Prime Agent daemon. Cause: ECONNRESET");
-		expect(closedError).toContain("restart Prime Agent or reopen the session from Agents View");
+		expect(closedError).toContain("Lost connection to the Fulcrum daemon. Cause: ECONNRESET");
+		expect(closedError).toContain("restart Fulcrum or reopen the session from Agents View");
 		expect(closedError).toContain("Session file: /tmp/session-current.jsonl.");
 		expect(closedError).toContain("Diagnostic log:");
 	});
@@ -1252,13 +1237,13 @@ describe("DaemonAgentConnection", () => {
 		});
 		await connection.attach();
 
-		fakeClient.emitClose(new DaemonSocketClosedError("/tmp/prime-agent.sock"));
+		fakeClient.emitClose(new DaemonSocketClosedError("/tmp/fulcrum.sock"));
 		await Promise.resolve();
 
 		expect(fakeClient.reconnectCount).toBe(0);
 		expect(closedEvents).toHaveLength(1);
 		const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
-		expect(closedError).toContain("Lost connection to the Prime Agent daemon.");
+		expect(closedError).toContain("Lost connection to the Fulcrum daemon.");
 	});
 
 	it("does not emit a restored session after disposal begins", async () => {
@@ -1282,7 +1267,7 @@ describe("DaemonAgentConnection", () => {
 		});
 		await connection.attach();
 
-		fakeClient.emitClose(new DaemonSocketClosedError("/tmp/prime-agent.sock", "update"));
+		fakeClient.emitClose(new DaemonSocketClosedError("/tmp/fulcrum.sock", "update"));
 		await vi.waitFor(() => {
 			expect(
 				fakeClient.requests.some(
@@ -1327,10 +1312,10 @@ describe("DaemonAgentConnection", () => {
 			expect(closedEvents).toHaveLength(1);
 			const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
 			expect(closedError).toContain(
-				"The Prime Agent daemon restarted for an update, but this window could not reconnect",
+				"The Fulcrum daemon restarted for an update, but this window could not reconnect",
 			);
 			expect(closedError).toContain("Last error: daemon unavailable");
-			expect(closedError).toContain("restart Prime Agent and reopen it from Agents View");
+			expect(closedError).toContain("restart Fulcrum and reopen it from Agents View");
 			expect(closedError).toContain("Session ID: session-current.");
 			expect(closedError).toContain("Session file: /tmp/session-current.jsonl.");
 			expect(closedError).toContain("Diagnostic log:");
@@ -2130,7 +2115,7 @@ describe("DaemonAgentConnection", () => {
 		});
 		await connection.attach();
 
-		fakeClient.emitClose(new DaemonSocketClosedError("/tmp/prime-agent.sock", "update"));
+		fakeClient.emitClose(new DaemonSocketClosedError("/tmp/fulcrum.sock", "update"));
 
 		await vi.waitFor(() => expect(statuses).toEqual(["reconnecting", "connected"]));
 		expect(fakeClient.requests.at(-1)).toMatchObject({

@@ -1,6 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -26,7 +35,7 @@ const children = new Set<ChildProcess>();
 const workerPids = new Set<number>();
 const daemonSockets = new Set<string>();
 const childDiagnostics = new WeakMap<ChildProcess, { stdout: string; stderr: string }>();
-const PROCESS_STRESS_WORKERS = Number.parseInt(process.env.PRIME_AGENT_STRESS_WORKERS ?? "10", 10);
+const PROCESS_STRESS_WORKERS = Number.parseInt(process.env.FULCRUM_STRESS_WORKERS ?? "10", 10);
 
 afterEach(async () => {
 	for (const socketPath of daemonSockets) {
@@ -420,7 +429,7 @@ describe("daemon supervisor resident workers", () => {
 			type: "create",
 			sessionPath: sessionFile,
 			lifecycle: "client_owned",
-			launchEnv: { PRIME_AGENT_OWNED_TEST: launchEnvSentinel },
+			launchEnv: { FULCRUM_OWNED_TEST: launchEnvSentinel },
 			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
 		});
 		expect(created.success).toBe(true);
@@ -496,6 +505,331 @@ describe("daemon supervisor resident workers", () => {
 		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("deletes bookkeeping-only client-owned sessions and their artifacts on completion", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(tmpdir(), `prime-supervisor-empty-owned-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			lifecycle: "client_owned",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid || !summary.activeSessionId || !summary.sessionFile) {
+			throw new Error("Client-owned draft did not persist a worker session");
+		}
+		workerPids.add(summary.workerPid);
+		const artifactDir = join(agentDir, "session-artifacts", summary.sessionId);
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(join(artifactDir, "draft-artifact"), "discard me");
+
+		const connection = await DaemonAgentConnection.attach(client, summary.activeSessionId, {
+			ownedSession: true,
+			supportsExtensionUi: false,
+		});
+		await connection.dispose();
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+		expect(existsSync(summary.sessionFile)).toBe(false);
+		expect(existsSync(artifactDir)).toBe(false);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("discards an unconfigured resident draft after its last client detaches", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-empty-detach-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid || !summary.activeSessionId || !summary.sessionFile) {
+			throw new Error("Resident draft did not persist a worker session");
+		}
+		workerPids.add(summary.workerPid);
+		const artifactDir = join(agentDir, "session-artifacts", summary.sessionId);
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(join(artifactDir, "draft-artifact"), "discard me");
+
+		const connection = await DaemonAgentConnection.attach(client, summary.activeSessionId, {
+			supportsExtensionUi: false,
+		});
+		await connection.dispose();
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+		expect(existsSync(summary.sessionFile)).toBe(false);
+		expect(existsSync(artifactDir)).toBe(false);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("cancels detached draft cleanup when the client reattaches", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-empty-reattach-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid || !summary.activeSessionId || !summary.sessionFile) {
+			throw new Error("Resident draft did not persist a worker session");
+		}
+		workerPids.add(summary.workerPid);
+		const connection = await DaemonAgentConnection.attach(client, summary.activeSessionId, {
+			supportsExtensionUi: false,
+		});
+		await connection.dispose();
+		const reattached = await DaemonAgentConnection.attach(client, summary.activeSessionId, {
+			supportsExtensionUi: false,
+		});
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+		expect(existsSync(summary.sessionFile)).toBe(true);
+		await reattached.dispose();
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+		expect(existsSync(summary.sessionFile)).toBe(false);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("discards an unconfigured resident draft after its client socket closes", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-empty-socket-close-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid || !summary.activeSessionId || !summary.sessionFile) {
+			throw new Error("Resident draft did not persist a worker session");
+		}
+		workerPids.add(summary.workerPid);
+		await DaemonAgentConnection.attach(client, summary.activeSessionId, { supportsExtensionUi: false });
+		client.close();
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+		expect(existsSync(summary.sessionFile)).toBe(false);
+
+		const replacementClient = await connectEventually(socketPath, supervisor);
+		await replacementClient.request({ type: "shutdown" });
+		replacementClient.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("keeps a named resident draft alive after its last client detaches", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-named-detach-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid || !summary.activeSessionId || !summary.sessionFile) {
+			throw new Error("Named draft did not persist a worker session");
+		}
+		workerPids.add(summary.workerPid);
+		const connection = await DaemonAgentConnection.attach(client, summary.activeSessionId, {
+			supportsExtensionUi: false,
+		});
+		const named = await client.request({
+			type: "set_session_name",
+			activeSessionId: summary.activeSessionId,
+			name: "keep this draft",
+		});
+		expect(named.success).toBe(true);
+		await connection.dispose();
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+		expect(existsSync(summary.sessionFile)).toBe(true);
+		const listed = await client.request({ type: "list" });
+		expect(requireSessionList(listed.success ? listed.data : undefined)).toContainEqual(
+			expect.objectContaining({ activeSessionId: summary.activeSessionId, sessionName: "keep this draft" }),
+		);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+	}, 60_000);
+
+	it("keeps and flushes a configured resident draft after its last client detaches", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-configured-detach-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid || !summary.activeSessionId || !summary.sessionFile) {
+			throw new Error("Configured draft did not persist a worker session");
+		}
+		workerPids.add(summary.workerPid);
+		const connection = await DaemonAgentConnection.attach(client, summary.activeSessionId, {
+			supportsExtensionUi: false,
+		});
+		const configured = await client.request({
+			type: "set_service_tier",
+			activeSessionId: summary.activeSessionId,
+			serviceTier: "flex",
+		});
+		expect(configured.success).toBe(true);
+		await connection.dispose();
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+		expect(existsSync(summary.sessionFile)).toBe(true);
+		expect(readFileSync(summary.sessionFile, "utf8")).toContain('"serviceTier":"flex"');
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+	}, 60_000);
+
+	it("reaps orphaned empty drafts without deleting named, scheduled, or leased drafts", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-draft-reaper-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		const createBootstrapDraft = () => {
+			const manager = SessionManager.create(projectDir, sessionDir);
+			manager.appendModelChange("anthropic", "claude-opus-4-8");
+			manager.appendThinkingLevelChange("off");
+			manager.appendServiceTierChange("default");
+			manager.appendSessionState({ status: "active" });
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Draft fixture did not persist");
+			return { manager, sessionFile };
+		};
+		const orphan = createBootstrapDraft();
+		const orphanArtifactDir = orphan.manager.getSessionArtifactDir();
+		if (!orphanArtifactDir) throw new Error("Draft fixture did not create an artifact path");
+		mkdirSync(orphanArtifactDir, { recursive: true });
+		writeFileSync(join(orphanArtifactDir, "draft-artifact"), "discard me");
+		const corruptFile = join(sessionDir, "corrupt.jsonl");
+		writeFileSync(corruptFile, '{"type":"session"}\nnot json\n');
+
+		const named = createBootstrapDraft();
+		named.manager.appendSessionInfo("important draft");
+		const scheduled = createBootstrapDraft();
+		const scheduledStore = AgentCronJobStore.forSessionArtifacts();
+		const scheduledArtifactDir = scheduled.manager.getSessionArtifactDir();
+		if (!scheduledArtifactDir) throw new Error("Scheduled fixture did not create an artifact path");
+		scheduledStore.registerSessionArtifact(scheduled.manager.getSessionId(), scheduledArtifactDir);
+		scheduledStore.create({
+			activeSessionId: scheduled.manager.getSessionId(),
+			sessionId: scheduled.manager.getSessionId(),
+			sessionFile: scheduled.sessionFile,
+			cwd: projectDir,
+			prompt: "preserve this scheduled draft",
+			scheduleText: "every 1h",
+		});
+		const renamed = createBootstrapDraft();
+		const renamedSessionFile = join(sessionDir, "imported-bootstrap-draft.jsonl");
+		renameSync(renamed.sessionFile, renamedSessionFile);
+		const renamedArtifactDir = renamed.manager.getSessionArtifactDir();
+		if (!renamedArtifactDir) throw new Error("Renamed fixture did not create an artifact path");
+		scheduledStore.registerSessionArtifact(renamed.manager.getSessionId(), renamedArtifactDir);
+		scheduledStore.create({
+			activeSessionId: renamed.manager.getSessionId(),
+			sessionId: renamed.manager.getSessionId(),
+			sessionFile: renamedSessionFile,
+			cwd: projectDir,
+			prompt: "preserve this imported scheduled draft",
+			scheduleText: "every 1h",
+		});
+		const leased = createBootstrapDraft();
+		const lease = acquireSessionLease(leased.sessionFile, agentDir, {
+			[SESSION_LEASES_ENABLED_ENV]: "1",
+			[SESSION_LEASE_OWNER_ID_ENV]: "draft-reaper-fixture",
+		});
+		if (!lease) throw new Error("Draft fixture did not acquire a session lease");
+
+		try {
+			const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+			const client = await connectEventually(socketPath, supervisor);
+			expect(existsSync(orphan.sessionFile)).toBe(false);
+			expect(existsSync(orphanArtifactDir)).toBe(false);
+			expect(existsSync(corruptFile)).toBe(true);
+			expect(existsSync(named.sessionFile)).toBe(true);
+			expect(existsSync(scheduled.sessionFile)).toBe(true);
+			expect(existsSync(renamedSessionFile)).toBe(true);
+			expect(existsSync(leased.sessionFile)).toBe(true);
+			await client.request({ type: "shutdown" });
+			client.close();
+			await waitForSocketGone(socketPath);
+		} finally {
+			lease.release();
+		}
 	}, 60_000);
 
 	it("releases an adopted client-owned worker when disposal races supervisor replacement", async () => {
@@ -1297,7 +1631,7 @@ describe("daemon supervisor resident workers", () => {
 			throw new Error("Recovered worker did not expose its pid");
 		}
 		workerPids.add(recovered.workerPid);
-		expect(readFileSync(sessionFile, "utf8")).toContain("prime-agent.worker_recovery");
+		expect(readFileSync(sessionFile, "utf8")).toContain("fulcrum.worker_recovery");
 		await expect(connection.getState()).resolves.toMatchObject({ sessionId: createdSummary.sessionId });
 
 		await connection.dispose();

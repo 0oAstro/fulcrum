@@ -8,8 +8,8 @@ import { KernelManager } from "../src/core/kernel/index.js";
 /** Find a python that can launch an ipykernel and has dill, or null to skip. */
 function resolveKernelPython(): string | null {
 	const candidates = [
-		process.env.PRIME_AGENT_KERNEL_PYTHON,
-		join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"),
+		process.env.FULCRUM_KERNEL_PYTHON,
+		join(homedir(), ".fulcrum", "kernel-venv", "bin", "python"),
 	].filter((p): p is string => Boolean(p));
 	for (const python of candidates) {
 		if (!existsSync(python)) continue;
@@ -28,7 +28,7 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 	let manifestPath = "";
 
 	beforeAll(() => {
-		dir = mkdtempSync(join(tmpdir(), "prime-agent-state-roundtrip-"));
+		dir = mkdtempSync(join(tmpdir(), "fulcrum-state-roundtrip-"));
 		snapshotPath = join(dir, "session.dill");
 		manifestPath = join(dir, "session.json");
 	});
@@ -77,7 +77,7 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 	}, 60_000);
 
 	it("treats a missing snapshot as an empty restore (clean start)", async () => {
-		const freshDir = mkdtempSync(join(tmpdir(), "prime-agent-state-empty-"));
+		const freshDir = mkdtempSync(join(tmpdir(), "fulcrum-state-empty-"));
 		const manager = new KernelManager({
 			python: python as string,
 			cwd: freshDir,
@@ -93,7 +93,7 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 	}, 60_000);
 
 	it("snapshots and revives user variables that shadow builtins", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "prime-agent-state-shadow-"));
+		const dir = mkdtempSync(join(tmpdir(), "fulcrum-state-shadow-"));
 		const path = join(dir, "shadow.dill");
 		const cfg = { path, manifestPath: join(dir, "shadow.json") };
 		const writer = new KernelManager({ python: python as string, cwd: dir, snapshot: cfg });
@@ -119,7 +119,7 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 	}, 60_000);
 
 	it("treats a corrupt (non-dict) snapshot as no restore without throwing", async () => {
-		const badDir = mkdtempSync(join(tmpdir(), "prime-agent-state-corrupt-"));
+		const badDir = mkdtempSync(join(tmpdir(), "fulcrum-state-corrupt-"));
 		const badPath = join(badDir, "corrupt.dill");
 		const manager = new KernelManager({
 			python: python as string,
@@ -141,7 +141,7 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 	}, 60_000);
 
 	it("lists live user-defined names, filtering internals and live handles", async () => {
-		const listDir = mkdtempSync(join(tmpdir(), "prime-agent-state-list-"));
+		const listDir = mkdtempSync(join(tmpdir(), "fulcrum-state-list-"));
 		const manager = new KernelManager({ python: python as string, cwd: listDir });
 		try {
 			// A fresh, unstarted kernel reports no names.
@@ -159,7 +159,7 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 	}, 60_000);
 
 	it("auto-snapshots after a successful execution (debounced)", async () => {
-		const autoDir = mkdtempSync(join(tmpdir(), "prime-agent-state-auto-"));
+		const autoDir = mkdtempSync(join(tmpdir(), "fulcrum-state-auto-"));
 		const autoPath = join(autoDir, "auto.dill");
 		const manager = new KernelManager({
 			python: python as string,

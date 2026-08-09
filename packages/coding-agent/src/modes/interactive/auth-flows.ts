@@ -12,22 +12,8 @@ import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@ear
 import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { getAuthPath, getDocsPath } from "../../config.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
-import {
-	checkPrimeAgentTracesAccess,
-	checkPrimeInferenceAccess,
-	fetchPrimeTeams,
-	loadPrimeCliConfig,
-	loginPrimeAgentTraces,
-	loginPrimeInference,
-	PRIME_AGENT_TRACES_PROVIDER_ID,
-	PRIME_AGENT_TRACES_PROVIDER_NAME,
-	PRIME_INFERENCE_PROVIDER_ID,
-	PRIME_INFERENCE_PROVIDER_NAME,
-	type PrimeTeam,
-	resolvePrimeAgentTracesBaseUrl,
-} from "../../core/prime-inference-auth.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
-import { SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
+import { FIRECRAWL_CREDENTIAL_ID, FIRECRAWL_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
 import { showFullPaneOverlay } from "./components/centered-overlay.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { LoginDialogComponent } from "./components/login-dialog.js";
@@ -37,7 +23,6 @@ import {
 	compareAuthSelectorProviders,
 	OAuthSelectorComponent,
 } from "./components/oauth-selector.js";
-import { PrimeTeamSelectorComponent } from "./components/prime-team-selector.js";
 import { theme } from "./theme/theme.js";
 
 export type AuthenticationResult =
@@ -185,9 +170,6 @@ export class ProviderAuthFlows {
 		if (providerOption.authType === "oauth") {
 			return this.showLoginDialog(providerOption.id, providerOption.name, kind);
 		}
-		if (providerOption.id === PRIME_INFERENCE_PROVIDER_ID) {
-			return this.runPrimeInferenceLogin();
-		}
 		if (providerOption.id === BEDROCK_PROVIDER_ID) {
 			return this.showBedrockSetupDialog(providerOption.id, providerOption.name);
 		}
@@ -268,10 +250,10 @@ export class ProviderAuthFlows {
 			});
 		}
 
-		// Serper is a skill credential, not a model provider, so add it manually.
+		// Firecrawl is a service credential for built-in web modules, not a model provider.
 		options.push({
-			id: SERPER_CREDENTIAL_ID,
-			name: SERPER_CREDENTIAL_NAME,
+			id: FIRECRAWL_CREDENTIAL_ID,
+			name: FIRECRAWL_CREDENTIAL_NAME,
 			authType: "api_key",
 			category: "service",
 		});
@@ -290,10 +272,10 @@ export class ProviderAuthFlows {
 			if (!credential) {
 				continue;
 			}
-			const isSerper = providerId === SERPER_CREDENTIAL_ID;
+			const isFirecrawl = providerId === FIRECRAWL_CREDENTIAL_ID;
 			const isMcp = providerId.startsWith("mcp:");
-			const name = isSerper
-				? SERPER_CREDENTIAL_NAME
+			const name = isFirecrawl
+				? FIRECRAWL_CREDENTIAL_NAME
 				: isMcp
 					? (oauthProvidersById.get(providerId)?.name ?? providerId.slice("mcp:".length))
 					: this.host.modelRegistry.getProviderDisplayName(providerId);
@@ -301,19 +283,8 @@ export class ProviderAuthFlows {
 				id: providerId,
 				name,
 				authType: credential.type,
-				category: isSerper || isMcp ? "service" : "provider",
+				category: isFirecrawl || isMcp ? "service" : "provider",
 			});
-		}
-
-		if (!options.some((option) => option.id === PRIME_INFERENCE_PROVIDER_ID)) {
-			const primeInferenceStatus = authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID);
-			if (primeInferenceStatus.source === "prime_cli") {
-				options.push({
-					id: PRIME_INFERENCE_PROVIDER_ID,
-					name: PRIME_INFERENCE_PROVIDER_NAME,
-					authType: "api_key",
-				});
-			}
 		}
 
 		return options.sort((a, b) => a.name.localeCompare(b.name));
@@ -401,355 +372,6 @@ export class ProviderAuthFlows {
 				return { status: "failed" };
 			}
 			return { status: "cancelled" };
-		}
-	}
-
-	private showPrimeTeamSelector(
-		teams: PrimeTeam[],
-		currentTeamId: string | undefined,
-	): Promise<PrimeTeam | null | undefined> {
-		return new Promise((resolve) => {
-			let handle: OverlayHandle | undefined;
-			const close = () => {
-				handle?.hide();
-				this.host.ui.requestRender();
-			};
-			const selector = new PrimeTeamSelectorComponent(
-				teams,
-				currentTeamId,
-				(team) => {
-					close();
-					resolve(team);
-				},
-				() => {
-					close();
-					resolve(undefined);
-				},
-				{ getRows: () => this.host.ui.terminal.rows },
-			);
-			handle = showFullPaneOverlay(this.host.ui, selector, 78);
-		});
-	}
-
-	private getPrimeInferenceDefaultTeamStatus(): string {
-		const configPath = this.host.modelRegistry.authStorage.getPrimeCliConfigPath();
-		if (configPath) {
-			let config: ReturnType<typeof loadPrimeCliConfig>;
-			try {
-				config = loadPrimeCliConfig(configPath);
-			} catch {
-				return "Using personal account.";
-			}
-			if (config.teamIdFromEnv) {
-				return "Using team from PRIME_TEAM_ID.";
-			}
-			if (config.teamName) {
-				return `Using team "${config.teamName}".`;
-			}
-			if (config.teamId) {
-				return "Using Prime CLI team.";
-			}
-		}
-		const storedTeam = this.host.modelRegistry.authStorage.getPrimeInferenceTeamSelection();
-		if (storedTeam) {
-			return `Using team "${storedTeam.name}".`;
-		}
-		if (storedTeam === null) {
-			return "Using personal account.";
-		}
-		return "Using personal account.";
-	}
-
-	private async selectPrimeInferenceTeam(apiKey: string, dialog: LoginDialogComponent): Promise<string | undefined> {
-		try {
-			const config = loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath());
-			if (config.teamIdFromEnv) {
-				this.host.modelRegistry.authStorage.reload();
-				return "Using team from PRIME_TEAM_ID.";
-			}
-
-			dialog.showProgress("Loading Prime teams...");
-			const teams = await fetchPrimeTeams(apiKey, config.baseUrl, { signal: dialog.signal });
-			if (dialog.signal.aborted) {
-				return this.getPrimeInferenceDefaultTeamStatus();
-			}
-			if (teams.length === 0) {
-				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(null);
-				return "Using personal account.";
-			}
-
-			const storedTeam = this.host.modelRegistry.authStorage.getPrimeInferenceTeamSelection();
-			const currentTeamId = storedTeam === null ? undefined : (storedTeam?.teamId ?? config.teamId);
-			const selectedTeam = await this.showPrimeTeamSelector(teams, currentTeamId);
-			if (selectedTeam !== undefined) {
-				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(selectedTeam);
-			}
-			return selectedTeam
-				? `Using team "${selectedTeam.name}".`
-				: selectedTeam === null
-					? "Using personal account."
-					: this.getPrimeInferenceDefaultTeamStatus();
-		} catch {
-			this.host.modelRegistry.authStorage.reload();
-			return this.getPrimeInferenceDefaultTeamStatus();
-		}
-	}
-
-	private async completePrimeInferenceLogin(
-		apiKey: string,
-		dialog: LoginDialogComponent,
-		closeDialog: () => void,
-	): Promise<AuthenticationResult> {
-		this.host.modelRegistry.authStorage.setPrimeInferenceApiKey(apiKey);
-		const teamStatus = await this.selectPrimeInferenceTeam(apiKey, dialog);
-
-		closeDialog();
-		return await this.completeProviderAuthentication(
-			PRIME_INFERENCE_PROVIDER_ID,
-			PRIME_INFERENCE_PROVIDER_NAME,
-			"api_key",
-			teamStatus,
-			"provider",
-			this.host.modelRegistry.authStorage.getPrimeCliConfigPath() ?? getAuthPath(),
-		);
-	}
-
-	private async completePrimeAgentTracesLogin(apiKey: string, closeDialog: () => void): Promise<AuthenticationResult> {
-		this.host.modelRegistry.authStorage.set(PRIME_AGENT_TRACES_PROVIDER_ID, {
-			type: "api_key",
-			key: apiKey,
-		});
-
-		closeDialog();
-		return await this.completeProviderAuthentication(
-			PRIME_AGENT_TRACES_PROVIDER_ID,
-			PRIME_AGENT_TRACES_PROVIDER_NAME,
-			"api_key",
-		);
-	}
-
-	async runPrimeInferenceLogin(): Promise<AuthenticationResult> {
-		const dialog = new LoginDialogComponent(
-			this.host.ui,
-			PRIME_INFERENCE_PROVIDER_ID,
-			(_success, _message) => {
-				// Completion handled below.
-			},
-			PRIME_INFERENCE_PROVIDER_NAME,
-		);
-
-		const handle = showFullPaneOverlay(this.host.ui, dialog, {
-			maxContentWidth: 88,
-			suspendFullscreenMouse: true,
-		});
-
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
-
-		// The browser challenge gets its own controller so a manually pasted key
-		// can stop the polling without tearing down the dialog.
-		const browserAbort = new AbortController();
-		const onDialogAbort = () => browserAbort.abort();
-		dialog.signal.addEventListener("abort", onDialogAbort, { once: true });
-
-		let manualInputArmed = false;
-		let resolveManualKey: (entry: { apiKey: string; source: "manual" }) => void = () => {};
-		const manualKeyEntry = new Promise<{ apiKey: string; source: "manual" }>((resolve) => {
-			resolveManualKey = resolve;
-		});
-		const armManualInput = (prompt: string): void => {
-			manualInputArmed = true;
-			void (async () => {
-				let value = (await dialog.showManualInput(prompt)).trim();
-				while (!value) {
-					value = (await dialog.waitForInput()).trim();
-				}
-				resolveManualKey({ apiKey: value, source: "manual" });
-			})().catch(() => {
-				// Cancellation surfaces through the dialog signal.
-			});
-		};
-
-		try {
-			const browserLogin = loginPrimeInference(
-				{
-					onAuth: (info) => {
-						dialog.showAuth(info.url, info.instructions);
-						armManualInput("Complete the sign-in in your browser, or paste an API key below:");
-					},
-					onProgress: (message) => {
-						dialog.showProgress(message);
-					},
-					signal: browserAbort.signal,
-				},
-				{
-					configPath: this.host.modelRegistry.authStorage.getPrimeCliConfigPath(),
-				},
-			);
-			// When the browser challenge cannot start or breaks down, keep the dialog
-			// open and fall back to plain API key entry instead of failing outright.
-			const browserLoginOrFallback = browserLogin.catch((error: unknown) => {
-				if (browserAbort.signal.aborted) {
-					throw error;
-				}
-				const errorMsg = error instanceof Error ? error.message : String(error);
-				dialog.showProgress(`Browser sign-in unavailable (${errorMsg}).`);
-				if (!manualInputArmed) {
-					armManualInput("Paste a Prime API key below:");
-				}
-				return manualKeyEntry;
-			});
-			// Once the browser flow has settled into manual fallback, nothing above
-			// rejects on cancel anymore, so the dialog signal must end the race too.
-			const dialogCancelled = new Promise<never>((_, reject) => {
-				dialog.signal.addEventListener("abort", () => reject(new Error("Login cancelled")), { once: true });
-			});
-			// Promise.race observes the rejections below, but keep dedicated handlers
-			// so neither an aborted browser flow nor a cancelled dialog can surface
-			// as an unhandled rejection.
-			browserLoginOrFallback.catch(() => {});
-			dialogCancelled.catch(() => {});
-
-			const result = await Promise.race([browserLoginOrFallback, manualKeyEntry, dialogCancelled]);
-			if (dialog.signal.aborted) {
-				closeDialog();
-				return { status: "cancelled" };
-			}
-
-			if (result.source === "manual") {
-				browserAbort.abort();
-				dialog.showProgress("Checking Prime Inference access...");
-				const config = loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath());
-				const access = await checkPrimeInferenceAccess(result.apiKey, config.baseUrl, { signal: dialog.signal });
-				if (dialog.signal.aborted) {
-					closeDialog();
-					return { status: "cancelled" };
-				}
-				if (!access.ok) {
-					const status = access.status === undefined ? "" : `HTTP ${access.status}: `;
-					throw new Error(`Prime API key does not have Prime Inference access (${status}${access.message})`);
-				}
-			}
-
-			return await this.completePrimeInferenceLogin(result.apiKey, dialog, closeDialog);
-		} catch (error: unknown) {
-			closeDialog();
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			if (!dialog.signal.aborted && errorMsg !== "Login cancelled") {
-				this.host.showError(`Failed to login to ${PRIME_INFERENCE_PROVIDER_NAME}: ${errorMsg}`);
-				return { status: "failed" };
-			}
-			return { status: "cancelled" };
-		} finally {
-			dialog.signal.removeEventListener("abort", onDialogAbort);
-		}
-	}
-
-	async runPrimeAgentTracesLogin(): Promise<AuthenticationResult> {
-		const dialog = new LoginDialogComponent(
-			this.host.ui,
-			PRIME_AGENT_TRACES_PROVIDER_ID,
-			(_success, _message) => {
-				// Completion handled below.
-			},
-			PRIME_AGENT_TRACES_PROVIDER_NAME,
-		);
-
-		const handle = showFullPaneOverlay(this.host.ui, dialog, {
-			maxContentWidth: 88,
-			suspendFullscreenMouse: true,
-		});
-
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
-
-		const browserAbort = new AbortController();
-		const onDialogAbort = () => browserAbort.abort();
-		dialog.signal.addEventListener("abort", onDialogAbort, { once: true });
-
-		let manualInputArmed = false;
-		let resolveManualKey: (entry: { apiKey: string; source: "manual" }) => void = () => {};
-		const manualKeyEntry = new Promise<{ apiKey: string; source: "manual" }>((resolve) => {
-			resolveManualKey = resolve;
-		});
-		const armManualInput = (prompt: string): void => {
-			manualInputArmed = true;
-			void (async () => {
-				let value = (await dialog.showManualInput(prompt)).trim();
-				while (!value) {
-					value = (await dialog.waitForInput()).trim();
-				}
-				resolveManualKey({ apiKey: value, source: "manual" });
-			})().catch(() => {
-				// Cancellation surfaces through the dialog signal.
-			});
-		};
-
-		try {
-			const browserLogin = loginPrimeAgentTraces({
-				onAuth: (info) => {
-					dialog.showAuth(info.url, info.instructions);
-					armManualInput("Complete the sign-in in your browser, or paste a Prime API key below:");
-				},
-				onProgress: (message) => {
-					dialog.showProgress(message);
-				},
-				signal: browserAbort.signal,
-			});
-			const browserLoginOrFallback = browserLogin.catch((error: unknown) => {
-				if (browserAbort.signal.aborted) {
-					throw error;
-				}
-				const errorMsg = error instanceof Error ? error.message : String(error);
-				dialog.showProgress(`Browser sign-in unavailable (${errorMsg}).`);
-				if (!manualInputArmed) {
-					armManualInput("Paste a Prime API key below:");
-				}
-				return manualKeyEntry;
-			});
-			const dialogCancelled = new Promise<never>((_, reject) => {
-				dialog.signal.addEventListener("abort", () => reject(new Error("Login cancelled")), { once: true });
-			});
-			browserLoginOrFallback.catch(() => {});
-			dialogCancelled.catch(() => {});
-
-			const result = await Promise.race([browserLoginOrFallback, manualKeyEntry, dialogCancelled]);
-			if (dialog.signal.aborted) {
-				closeDialog();
-				return { status: "cancelled" };
-			}
-
-			if (result.source === "manual") {
-				browserAbort.abort();
-				dialog.showProgress("Checking Prime Agent trace access...");
-				const access = await checkPrimeAgentTracesAccess(result.apiKey, resolvePrimeAgentTracesBaseUrl(), {
-					signal: dialog.signal,
-				});
-				if (dialog.signal.aborted) {
-					closeDialog();
-					return { status: "cancelled" };
-				}
-				if (!access.ok) {
-					const status = access.status === undefined ? "" : `HTTP ${access.status}: `;
-					throw new Error(`Prime API key does not have Prime Agent trace access (${status}${access.message})`);
-				}
-			}
-
-			return await this.completePrimeAgentTracesLogin(result.apiKey, closeDialog);
-		} catch (error: unknown) {
-			closeDialog();
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			if (!dialog.signal.aborted && errorMsg !== "Login cancelled") {
-				this.host.showError(`Failed to login to ${PRIME_AGENT_TRACES_PROVIDER_NAME}: ${errorMsg}`);
-				return { status: "failed" };
-			}
-			return { status: "cancelled" };
-		} finally {
-			dialog.signal.removeEventListener("abort", onDialogAbort);
 		}
 	}
 

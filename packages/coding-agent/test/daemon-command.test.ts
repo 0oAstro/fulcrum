@@ -155,7 +155,7 @@ describe("daemon command", () => {
 
 	it("cleans prompt listeners when the prompt request fails", async () => {
 		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "prompt", "active-1", "hello"]),
+			handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "prompt", "active-1", "hello"]),
 		).resolves.toBe(true);
 
 		const client = daemonClientMock.instances[0];
@@ -169,14 +169,7 @@ describe("daemon command", () => {
 	it("ignores stale agent_end events before a daemon prompt starts", async () => {
 		daemonClientMock.behavior.promptSucceeds = true;
 		daemonClientMock.behavior.emitStaleAgentEndOnAttach = true;
-		const command = handleDaemonCommand([
-			"daemon",
-			"--socket",
-			"/tmp/prime-agent.sock",
-			"prompt",
-			"active-1",
-			"hello",
-		]);
+		const command = handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "prompt", "active-1", "hello"]);
 
 		await flushPromises();
 
@@ -199,14 +192,7 @@ describe("daemon command", () => {
 	});
 
 	it("ends json attach when the session closes", async () => {
-		const command = handleDaemonCommand([
-			"daemon",
-			"--socket",
-			"/tmp/prime-agent.sock",
-			"--json",
-			"attach",
-			"active-1",
-		]);
+		const command = handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "--json", "attach", "active-1"]);
 
 		await flushPromises();
 
@@ -224,7 +210,7 @@ describe("daemon command", () => {
 		const unsafeIntegerName = "9007199254740992";
 		daemonClientMock.behavior.sessions = [makeSessionSummary("active-1", "session-1", unsafeIntegerName)];
 
-		await expect(handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock"])).resolves.toBe(true);
+		await expect(handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock"])).resolves.toBe(true);
 
 		const client = daemonClientMock.instances[1];
 		expect(client?.requests[0]).toEqual({ type: "list", all: true });
@@ -234,7 +220,7 @@ describe("daemon command", () => {
 
 	it("keeps create session name after an unknown boolean extension flag", async () => {
 		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "--unknown-typo", "my-session"]),
+			handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "create", "--unknown-typo", "my-session"]),
 		).resolves.toBe(true);
 
 		const client = daemonClientMock.instances[0];
@@ -253,7 +239,7 @@ describe("daemon command", () => {
 
 	it("parses extension flag values with equals without consuming the create name", async () => {
 		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "--ticket=123", "my-session"]),
+			handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "create", "--ticket=123", "my-session"]),
 		).resolves.toBe(true);
 
 		const client = daemonClientMock.instances[0];
@@ -272,7 +258,7 @@ describe("daemon command", () => {
 
 	it("keeps bare --resume values as session id selectors", async () => {
 		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "--resume", "abc123"]),
+			handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "create", "--resume", "abc123"]),
 		).resolves.toBe(true);
 
 		const client = daemonClientMock.instances[0];
@@ -284,7 +270,7 @@ describe("daemon command", () => {
 
 	it("rejects unknown send options instead of folding them into the message", async () => {
 		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "send", "worker", "--bogus", "hello"]),
+			handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "send", "worker", "--bogus", "hello"]),
 		).resolves.toBe(true);
 
 		expect(daemonClientMock.instances[0]?.requests).toEqual([]);
@@ -300,7 +286,7 @@ describe("daemon command", () => {
 			handleDaemonCommand([
 				"daemon",
 				"--socket",
-				"/tmp/prime-agent.sock",
+				"/tmp/fulcrum.sock",
 				"send",
 				"worker",
 				"--",
@@ -324,7 +310,7 @@ describe("daemon command", () => {
 			handleDaemonCommand([
 				"daemon",
 				"--socket",
-				"/tmp/prime-agent.sock",
+				"/tmp/fulcrum.sock",
 				"send",
 				"--",
 				"--target-like",
@@ -343,7 +329,7 @@ describe("daemon command", () => {
 
 	it("rejects extra agent-messages status arguments", async () => {
 		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "agent-messages", "pause", "active-1"]),
+			handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "agent-messages", "pause", "active-1"]),
 		).resolves.toBe(true);
 
 		expect(daemonClientMock.instances[0]?.requests).toEqual([]);
@@ -359,7 +345,7 @@ describe("daemon command", () => {
 			handleDaemonCommand([
 				"daemon",
 				"--socket",
-				"/tmp/prime-agent.sock",
+				"/tmp/fulcrum.sock",
 				"send",
 				"--from",
 				"planner",
@@ -383,7 +369,7 @@ describe("daemon command", () => {
 			handleDaemonCommand([
 				"daemon",
 				"--socket",
-				"/tmp/prime-agent.sock",
+				"/tmp/fulcrum.sock",
 				"cron",
 				"add",
 				"active-1",
@@ -406,7 +392,7 @@ describe("daemon command", () => {
 		daemonClientMock.behavior.sessions = [makeSessionSummary("active-1", "session-1", "alpha")];
 
 		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "--json", "cron", "list", "alpha"]),
+			handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "--json", "cron", "list", "alpha"]),
 		).resolves.toBe(true);
 
 		expect(daemonClientMock.instances[0]?.requests).toEqual([
@@ -420,7 +406,7 @@ describe("daemon command", () => {
 			handleDaemonCommand([
 				"daemon",
 				"--socket",
-				"/tmp/prime-agent.sock",
+				"/tmp/fulcrum.sock",
 				"create",
 				"--goal",
 				"Write tests",
@@ -440,15 +426,7 @@ describe("daemon command", () => {
 	});
 
 	it("rejects empty --goal in daemon create", async () => {
-		await handleDaemonCommand([
-			"daemon",
-			"--socket",
-			"/tmp/prime-agent.sock",
-			"create",
-			"--goal",
-			"  ",
-			"my-session",
-		]);
+		await handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "create", "--goal", "  ", "my-session"]);
 		expect(process.exitCode).toBe(1);
 		expect(
 			consoleErrorMessages.some((m) => typeof m === "string" && m.includes("--goal requires a non-empty objective")),
@@ -459,7 +437,7 @@ describe("daemon command", () => {
 		await handleDaemonCommand([
 			"daemon",
 			"--socket",
-			"/tmp/prime-agent.sock",
+			"/tmp/fulcrum.sock",
 			"create",
 			"--goal-token-budget",
 			"50000",
@@ -482,7 +460,7 @@ describe("daemon command", () => {
 		await handleDaemonCommand([
 			"daemon",
 			"--socket",
-			"/tmp/prime-agent-goal-leak-test.sock",
+			"/tmp/fulcrum-goal-leak-test.sock",
 			"start",
 			"--goal",
 			"Leak test goal",
@@ -504,7 +482,7 @@ describe("daemon command", () => {
 		await handleDaemonCommand([
 			"daemon",
 			"--socket",
-			"/tmp/prime-agent.sock",
+			"/tmp/fulcrum.sock",
 			"create",
 			"--goal",
 			"Write tests",
@@ -518,7 +496,7 @@ describe("daemon command", () => {
 		});
 
 		// Second create without goal — config must NOT have initialGoal.
-		await handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "second"]);
+		await handleDaemonCommand(["daemon", "--socket", "/tmp/fulcrum.sock", "create", "second"]);
 		const secondConfig = daemonClientMock.instances.at(-1)?.requests[0]?.config;
 		expect(secondConfig?.initialGoal).toBeUndefined();
 	});

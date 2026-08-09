@@ -64,12 +64,12 @@ export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
 }
 
-export interface BundledSkillsSettings {
-	websearch?: boolean; // default: true
-}
-
 export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
+}
+
+export interface WebsearchSettings {
+	researchModel?: string; // exact model ID or provider/model reference used for planning and synthesis
 }
 
 export type TransportSetting = Transport;
@@ -135,8 +135,6 @@ export interface Settings {
 	theme?: string;
 	compaction?: CompactionSettings;
 	autoRefine?: AutoRefineSettings;
-	agentTraces?: AgentTracesSettings;
-	telemetry?: TelemetrySettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
@@ -151,8 +149,7 @@ export interface Settings {
 	prompts?: string[]; // Array of local prompt template paths or directories
 	themes?: string[]; // Array of local theme file paths or directories
 	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
-	bundledSkills?: BundledSkillsSettings; // Configure built-in skills shipped with Prime Agent
-	enableBuiltinSkills?: boolean; // default: true - load built-in skills shipped with prime-agent
+	enableBuiltinSkills?: boolean; // default: true - load built-in skills shipped with fulcrum
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
@@ -163,16 +160,8 @@ export interface Settings {
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
+	websearch?: WebsearchSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
-}
-
-export interface AgentTracesSettings {
-	enabled?: boolean;
-}
-
-export interface TelemetrySettings {
-	enabled?: boolean;
-	noticeShown?: boolean;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -451,15 +440,6 @@ export class SettingsManager {
 				};
 			}
 			delete retrySettings.maxDelayMs;
-		}
-
-		if (typeof settings.telemetry === "boolean") {
-			settings.telemetry = { enabled: settings.telemetry };
-		} else if (
-			settings.telemetry !== undefined &&
-			(typeof settings.telemetry !== "object" || settings.telemetry === null || Array.isArray(settings.telemetry))
-		) {
-			delete settings.telemetry;
 		}
 
 		return settings as Settings;
@@ -816,50 +796,6 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getAgentTracesEnabled(): boolean {
-		return this.settings.agentTraces?.enabled ?? false;
-	}
-
-	setAgentTracesEnabled(enabled: boolean): void {
-		if (!this.globalSettings.agentTraces) {
-			this.globalSettings.agentTraces = {};
-		}
-		this.globalSettings.agentTraces.enabled = enabled;
-		this.markModified("agentTraces", "enabled");
-		this.save();
-	}
-
-	getTelemetryEnabled(): boolean {
-		const globalEnabled = this.globalSettings.telemetry?.enabled ?? true;
-		const projectEnabled = this.projectSettings.telemetry?.enabled ?? true;
-		const runtimeEnabled = this.runtimeOverrides.telemetry?.enabled ?? true;
-		return globalEnabled && projectEnabled && runtimeEnabled;
-	}
-
-	private getOrCreateGlobalTelemetrySettings(): TelemetrySettings {
-		const telemetry = this.globalSettings.telemetry;
-		if (typeof telemetry !== "object" || telemetry === null || Array.isArray(telemetry)) {
-			this.globalSettings.telemetry = {};
-		}
-		return this.globalSettings.telemetry!;
-	}
-
-	setTelemetryEnabled(enabled: boolean): void {
-		this.getOrCreateGlobalTelemetrySettings().enabled = enabled;
-		this.markModified("telemetry", "enabled");
-		this.save();
-	}
-
-	getTelemetryNoticeShown(): boolean {
-		return this.runtimeOverrides.telemetry?.noticeShown ?? this.globalSettings.telemetry?.noticeShown ?? false;
-	}
-
-	setTelemetryNoticeShown(shown: boolean): void {
-		this.getOrCreateGlobalTelemetrySettings().noticeShown = shown;
-		this.markModified("telemetry", "noticeShown");
-		this.save();
-	}
-
 	getCompactionReserveTokens(): number {
 		return this.settings.compaction?.reserveTokens ?? 16384;
 	}
@@ -1082,16 +1018,6 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getBundledSkills(): { websearch: boolean } {
-		return {
-			websearch: this.settings.bundledSkills?.websearch ?? true,
-		};
-	}
-
-	getBundledWebsearchEnabled(): boolean {
-		return this.getBundledSkills().websearch;
-	}
-
 	getEnableBuiltinSkills(): boolean {
 		return this.settings.enableBuiltinSkills ?? true;
 	}
@@ -1207,6 +1133,10 @@ export class SettingsManager {
 
 	getEnabledModels(): string[] | undefined {
 		return this.settings.enabledModels;
+	}
+
+	getWebsearchResearchModel(): string | undefined {
+		return this.settings.websearch?.researchModel?.trim() || undefined;
 	}
 
 	getMcpServers(): Record<string, McpServerConfig> | undefined {

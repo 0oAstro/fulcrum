@@ -81,7 +81,6 @@ import {
 	normalizeObserveMaxChars,
 	ORCHESTRATION_HEARTBEAT_SKILL_NAME,
 } from "./agent-observe.js";
-import { flushAgentTraceUpload } from "./agent-traces.js";
 import {
 	addLoginGuidanceToAuthError,
 	formatAuthenticationFailedMessage,
@@ -152,6 +151,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
+import { createWebsearchHostHandlers } from "./firecrawl-host.js";
 import {
 	createGoalContextMessage,
 	emptyGoalState,
@@ -270,7 +270,7 @@ import { createAllToolDefinitions } from "./tools/index.js";
 import { IpythonKernelProvisioner } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { addAssistantUsage, emptyUsage } from "./usage.js";
-import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
+import { FIRECRAWL_CREDENTIAL_ID } from "./websearch-credential.js";
 
 export type { GoalState, GoalStatus } from "./goals.js";
 export type { SessionStats } from "./session-stats.js";
@@ -2020,7 +2020,7 @@ export class AgentSession {
 		if (!this.model) {
 			throw new Error(formatNoModelSelectedMessage());
 		}
-		if (!this._modelRegistry.hasConfiguredAuth(this.model)) {
+		if (!(await this._modelRegistry.canUseModel(this.model))) {
 			const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
 			if (isOAuth) {
 				throw new Error(formatAuthenticationFailedMessage(this.model.provider));
@@ -6609,11 +6609,11 @@ export class AgentSession {
 	 * @throws Error if the model is not available
 	 */
 	async setModel(model: Model<any>, options: ModelSelectOptions = {}): Promise<void> {
-		if (!this._modelRegistry.hasConfiguredAuth(model)) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
-		}
 		if (!(await this._modelRegistry.canUseModel(model))) {
-			throw new Error(`Model "${model.provider}/${model.id}" is not available for the current Prime team.`);
+			if (!this._modelRegistry.hasConfiguredAuth(model)) {
+				throw new Error(`No API key for ${model.provider}/${model.id}`);
+			}
+			throw new Error(`Model "${model.provider}/${model.id}" is not available with the configured credentials.`);
 		}
 
 		const previousModel = this.model;
@@ -7851,7 +7851,7 @@ export class AgentSession {
 			if (targetScope === "global") {
 				appendGlobalRefinement(globalHarnessStateDir, result);
 			}
-			this.sessionManager.appendCustomEntry("prime-agent.refinement", result);
+			this.sessionManager.appendCustomEntry("fulcrum.refinement", result);
 			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 			this.agent.state.systemPrompt = this._baseSystemPrompt;
 			try {
@@ -8410,7 +8410,7 @@ export class AgentSession {
 				refreshTools: () => this._refreshToolRegistry(),
 				getCommands,
 				setModel: async (model) => {
-					if (!this.modelRegistry.hasConfiguredAuth(model)) return false;
+					if (!(await this.modelRegistry.canUseModel(model))) return false;
 					await this.setModel(model);
 					return true;
 				},
@@ -8692,6 +8692,14 @@ export class AgentSession {
 				input: this.model?.input ?? [],
 			}),
 		};
+		Object.assign(
+			handlers,
+			createWebsearchHostHandlers({
+				getApiKey: () => this._resolveFirecrawlApiKey(),
+				modelRegistry: this._modelRegistry,
+				researchModel: this.settingsManager.getWebsearchResearchModel(),
+			}),
+		);
 		if (this._includeGoals) {
 			for (const type of ["goal.get", "goal.create", "goal.complete"]) {
 				handlers[type] = async (payload) => this.handleGoalHostRequest(type, payload);
@@ -8782,6 +8790,14 @@ export class AgentSession {
 		return handlers;
 	}
 
+	private _resolveFirecrawlApiKey(): string | undefined {
+		const credential = this._modelRegistry.authStorage.get(FIRECRAWL_CREDENTIAL_ID);
+		if (credential?.type !== "api_key") {
+			return undefined;
+		}
+		return resolveConfigValue(credential.key)?.trim() || undefined;
+	}
+
 	async reload(): Promise<void> {
 		const previousFlagValues = this._extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this._extensionRunner, {
@@ -8832,31 +8848,10 @@ export class AgentSession {
 			// ephemeral sessions fall back to the RLM session dir once it exists.
 			env.RLM_HARNESS_STATE_DIR = this._localHarnessStateDir() ?? getLocalHarnessStateDir(rlmSessionDir)!;
 		}
-		this._addWebsearchKeyEnv(env);
-		return env;
-	}
-
-	private _addWebsearchKeyEnv(env: Record<string, string>): void {
 		if (this._agentDir) {
-			env.PRIME_AGENT_CODING_AGENT_DIR = this._agentDir;
+			env.FULCRUM_CODING_AGENT_DIR = this._agentDir;
 		}
-
-		if (process.env[SERPER_ENV_VAR]?.trim()) {
-			return;
-		}
-		// Inject only when a websearch skill (bundled or custom) is actually loaded,
-		// so the key isn't exposed to kernels that can't use it.
-		if (!this._resourceLoader.getSkills().skills.some((skill) => skill.name === WEBSEARCH_SKILL_NAME)) {
-			return;
-		}
-		const cred = this._modelRegistry.authStorage.get(SERPER_CREDENTIAL_ID);
-		if (cred?.type !== "api_key") {
-			return;
-		}
-		const resolved = resolveConfigValue(cred.key)?.trim();
-		if (resolved) {
-			env[SERPER_ENV_VAR] = resolved;
-		}
+		return env;
 	}
 
 	// Undefined when there's no persistent artifact dir (e.g. the viewer client):
@@ -8896,7 +8891,7 @@ export class AgentSession {
 	}
 
 	private _createEphemeralRlmSessionDir(): string {
-		this._rlmSessionDir = mkdtempSync(join(tmpdir(), "prime-agent-rlm-"));
+		this._rlmSessionDir = mkdtempSync(join(tmpdir(), "fulcrum-rlm-"));
 		return this._rlmSessionDir;
 	}
 
@@ -9782,7 +9777,6 @@ export class AgentSession {
 						}
 						const text = compactRlmText(readAssistantText(assistant));
 						if (text) answerPreview = text;
-						void flushAgentTraceUpload(child.sessionManager).catch(() => undefined);
 						emitChildUpdate();
 					} else if (event.type === "message_start" || event.type === "message_update") {
 						if (event.message.role === "assistant") {

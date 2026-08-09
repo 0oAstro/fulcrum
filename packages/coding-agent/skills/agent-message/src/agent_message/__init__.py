@@ -1,7 +1,7 @@
-"""Prime Agent session-to-session messaging skill.
+"""Fulcrum session-to-session messaging skill.
 
 All routing and sender identity live in the TypeScript daemon. These functions
-only call the host bridge exposed inside the Prime Agent IPython kernel.
+only call the host bridge exposed inside the Fulcrum IPython kernel.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from IPython.display import display
 from rlm import host_request
 
 ReceiverRole = Literal["parent", "sibling", "child"]
-_MESSAGE_DISPLAY_MIME = "application/vnd.prime-agent.agent-message+json"
+_MESSAGE_DISPLAY_MIME = "application/vnd.fulcrum.agent-message+json"
 
 
 async def list_agents() -> dict[str, Any]:

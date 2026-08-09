@@ -80,6 +80,37 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		summary: "Show background service status",
 	},
 	{
+		path: ["gateway"],
+		usage: "gateway <start|stop|status|restart|pair>",
+		summary: "Manage the WhatsApp gateway",
+		description: "The gateway always runs as a detached background process.",
+	},
+	{
+		path: ["gateway", "start"],
+		usage: "gateway start",
+		summary: "Start the gateway in the background",
+	},
+	{
+		path: ["gateway", "stop"],
+		usage: "gateway stop",
+		summary: "Stop the background gateway",
+	},
+	{
+		path: ["gateway", "status"],
+		usage: "gateway status",
+		summary: "Show gateway status and log path",
+	},
+	{
+		path: ["gateway", "restart"],
+		usage: "gateway restart",
+		summary: "Restart the gateway in the background",
+	},
+	{
+		path: ["gateway", "pair"],
+		usage: "gateway pair",
+		summary: "Print the current pairing code or QR",
+	},
+	{
 		path: ["doctor"],
 		usage: "doctor [--fix] [--json]",
 		summary: "Inspect and safely clean up background services",
@@ -123,7 +154,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	{
 		path: ["update"],
 		usage: "update [--force]",
-		summary: "Update Prime Agent",
+		summary: "Update Fulcrum",
 	},
 	{
 		path: ["model"],

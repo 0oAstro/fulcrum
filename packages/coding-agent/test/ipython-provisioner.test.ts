@@ -12,13 +12,13 @@ let tempDir = "";
 
 // These tests count spawns of a stub python; the default-on forkserver adds an
 // extra spawn + ready handshake the stub never answers, so pin direct-spawn.
-const savedForkFlag = process.env.PRIME_AGENT_KERNEL_FORKSERVER;
+const savedForkFlag = process.env.FULCRUM_KERNEL_FORKSERVER;
 beforeAll(() => {
-	process.env.PRIME_AGENT_KERNEL_FORKSERVER = "0";
+	process.env.FULCRUM_KERNEL_FORKSERVER = "0";
 });
 afterAll(() => {
-	if (savedForkFlag === undefined) delete process.env.PRIME_AGENT_KERNEL_FORKSERVER;
-	else process.env.PRIME_AGENT_KERNEL_FORKSERVER = savedForkFlag;
+	if (savedForkFlag === undefined) delete process.env.FULCRUM_KERNEL_FORKSERVER;
+	else process.env.FULCRUM_KERNEL_FORKSERVER = savedForkFlag;
 });
 
 function writeFakePython(opts: { sleepSeconds?: number } = {}): { python: string; countRuns: () => number } {
@@ -73,7 +73,7 @@ function createBusyKernelContext(
 
 describe("IpythonKernelProvisioner", () => {
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "prime-agent-provisioner-"));
+		tempDir = mkdtempSync(join(tmpdir(), "fulcrum-provisioner-"));
 	});
 
 	afterEach(() => {
@@ -343,7 +343,7 @@ describe("IpythonKernelProvisioner", () => {
 
 describe("KernelManager session cleanup during startup", () => {
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "prime-agent-kernel-cleanup-"));
+		tempDir = mkdtempSync(join(tmpdir(), "fulcrum-kernel-cleanup-"));
 	});
 
 	afterEach(() => {

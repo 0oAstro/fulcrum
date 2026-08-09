@@ -266,7 +266,7 @@ except ValueError as error:
 		// Emit an oversized attachment directly, bypassing the skill's own cap.
 		const result = await manager.execute(`
 from IPython.display import display
-display({"application/vnd.prime-agent.attachment+json": {"mime_type": "image/png", "data": "A" * 10_000_001}}, raw=True)
+display({"application/vnd.fulcrum.attachment+json": {"mime_type": "image/png", "data": "A" * 10_000_001}}, raw=True)
 print("done")
 `);
 

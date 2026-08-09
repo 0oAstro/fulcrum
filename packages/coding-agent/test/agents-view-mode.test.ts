@@ -231,35 +231,7 @@ describe("AgentsViewMode", () => {
 		});
 	});
 
-	it("checks telemetry policy before replying from an opted-out agents view", async () => {
-		const client = { close: vi.fn() };
-		const connectDedicatedClient = vi.fn(async () => client);
-		const self = {
-			options: {
-				config: { telemetryDisabled: true },
-				recoverDaemon: vi.fn(async () => undefined),
-				reconnectTimeoutMs: 1234,
-			},
-			connectDedicatedClient,
-		};
-
-		await invoke("sendPrompt", self, "active-1", "private prompt", "followUp");
-
-		expect(connectDedicatedClient).toHaveBeenCalledOnce();
-		expect(DaemonAgentConnection.attach).toHaveBeenCalledWith(client, "active-1", {
-			closeClientOnDispose: true,
-			supportsExtensionUi: false,
-			recoverDaemon: self.options.recoverDaemon,
-			reconnectTimeoutMs: 1234,
-			telemetryDisabled: true,
-		});
-		expect(modeMocks.connectionPrompt).toHaveBeenCalledWith("private prompt", {
-			streamingBehavior: "followUp",
-		});
-		expect(modeMocks.dispose).toHaveBeenCalledOnce();
-	});
-
-	it("keeps direct agents-view replies when telemetry is enabled", async () => {
+	it("sends agents-view replies directly", async () => {
 		const request = vi.fn(async () => ({ success: true as const, data: undefined }));
 		const self = {
 			options: { config: {} },
@@ -292,7 +264,7 @@ describe("AgentsViewMode", () => {
 
 		await runAgentsViewMode({
 			socketPath: "/tmp/fake-daemon.sock",
-			config: { cwd: "/tmp", telemetryDisabled: true } as never,
+			config: { cwd: "/tmp" } as never,
 			initialSession: previous,
 			uiServices: {
 				settingsManager: settingsManager as never,
@@ -308,7 +280,7 @@ describe("AgentsViewMode", () => {
 		expect(DaemonAgentConnection.attach).toHaveBeenCalledWith(
 			expect.anything(),
 			opened.activeSessionId,
-			expect.objectContaining({ telemetryDisabled: true }),
+			expect.any(Object),
 		);
 		runView.mockRestore();
 	});

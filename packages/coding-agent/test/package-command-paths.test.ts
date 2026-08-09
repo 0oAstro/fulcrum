@@ -31,7 +31,10 @@ describe("package commands", () => {
 	let originalCwd: string;
 	let originalAgentDir: string | undefined;
 	let originalPiPackageDir: string | undefined;
-	let originalPrimeAgentDownloadBaseUrl: string | undefined;
+	let originalFulcrumDownloadBaseUrl: string | undefined;
+	let originalFulcrumSkipVersionCheck: string | undefined;
+	let originalFulcrumOffline: string | undefined;
+	let originalDaemonSupervisorSocket: string | undefined;
 	let originalTmpDir: string | undefined;
 	let originalExitCode: typeof process.exitCode;
 	let originalExecPath: string;
@@ -52,12 +55,18 @@ describe("package commands", () => {
 
 		originalCwd = process.cwd();
 		originalAgentDir = process.env[ENV_AGENT_DIR];
-		originalPiPackageDir = process.env.PI_PACKAGE_DIR;
-		originalPrimeAgentDownloadBaseUrl = process.env.PRIME_AGENT_DOWNLOAD_BASE_URL;
+		originalPiPackageDir = process.env.FULCRUM_PACKAGE_DIR;
+		originalFulcrumDownloadBaseUrl = process.env.FULCRUM_DOWNLOAD_BASE_URL;
+		originalFulcrumSkipVersionCheck = process.env.FULCRUM_SKIP_VERSION_CHECK;
+		originalFulcrumOffline = process.env.FULCRUM_OFFLINE;
+		originalDaemonSupervisorSocket = process.env.FULCRUM_INTERNAL_DAEMON_SUPERVISOR_SOCKET;
 		originalTmpDir = process.env.TMPDIR;
 		originalExitCode = process.exitCode;
 		originalExecPath = process.execPath;
 		process.exitCode = undefined;
+		delete process.env.FULCRUM_SKIP_VERSION_CHECK;
+		delete process.env.FULCRUM_OFFLINE;
+		process.env.FULCRUM_INTERNAL_DAEMON_SUPERVISOR_SOCKET = join(tempDir, "daemon.sock");
 		process.env[ENV_AGENT_DIR] = agentDir;
 		process.env.TMPDIR = tempDir;
 		process.chdir(projectDir);
@@ -68,8 +77,11 @@ describe("package commands", () => {
 		process.chdir(originalCwd);
 		process.exitCode = originalExitCode;
 		restoreEnv(ENV_AGENT_DIR, originalAgentDir);
-		restoreEnv("PI_PACKAGE_DIR", originalPiPackageDir);
-		restoreEnv("PRIME_AGENT_DOWNLOAD_BASE_URL", originalPrimeAgentDownloadBaseUrl);
+		restoreEnv("FULCRUM_PACKAGE_DIR", originalPiPackageDir);
+		restoreEnv("FULCRUM_DOWNLOAD_BASE_URL", originalFulcrumDownloadBaseUrl);
+		restoreEnv("FULCRUM_SKIP_VERSION_CHECK", originalFulcrumSkipVersionCheck);
+		restoreEnv("FULCRUM_OFFLINE", originalFulcrumOffline);
+		restoreEnv("FULCRUM_INTERNAL_DAEMON_SUPERVISOR_SOCKET", originalDaemonSupervisorSocket);
 		restoreEnv("TMPDIR", originalTmpDir);
 		Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
 		rmSync(tempDir, { recursive: true, force: true });
@@ -187,9 +199,9 @@ describe("package commands", () => {
 		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
 		const recordPath = join(tempDir, "self-update.json");
-		const tarballUrl = "https://downloads.example.test/prime-agent/prime-agent-current.tgz";
+		const tarballUrl = "https://downloads.example.test/fulcrum/fulcrum-current.tgz";
 		mkdirSync(selfPackageDir, { recursive: true });
-		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
+		mkdirSync(join(projectDir, ".fulcrum"), { recursive: true });
 		writeFileSync(
 			fakeNpmPath,
 			`const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prefix=args[args.indexOf("--prefix")+1];
@@ -202,10 +214,10 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
 		);
 		writeFileSync(
-			join(projectDir, ".prime", "agent", "settings.json"),
+			join(projectDir, ".fulcrum", "settings.json"),
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", projectPrefix] }, null, 2),
 		);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
+		process.env.FULCRUM_PACKAGE_DIR = selfPackageDir;
 		Object.defineProperty(process, "execPath", {
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
@@ -249,7 +261,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			join(agentDir, "settings.json"),
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
 		);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
+		process.env.FULCRUM_PACKAGE_DIR = selfPackageDir;
 		Object.defineProperty(process, "execPath", {
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
@@ -295,7 +307,7 @@ else {
 			join(agentDir, "settings.json"),
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
 		);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
+		process.env.FULCRUM_PACKAGE_DIR = selfPackageDir;
 		Object.defineProperty(process, "execPath", {
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
@@ -325,13 +337,13 @@ else {
 		}
 	});
 
-	it("installs the Prime Agent tarball from the update manifest during self-update", async () => {
+	it("installs the Fulcrum tarball from the update manifest during self-update", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
 		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
 		const recordPath = join(tempDir, "self-update.json");
-		const baseUrl = "https://downloads.example.test/prime-agent";
-		const tarballPath = "releases/v0.73.0/prime-agent-0.73.0.tgz";
+		const baseUrl = "https://downloads.example.test/fulcrum";
+		const tarballPath = "releases/v0.73.0/fulcrum-0.73.0.tgz";
 		mkdirSync(selfPackageDir, { recursive: true });
 		writeFileSync(
 			fakeNpmPath,
@@ -348,15 +360,15 @@ else {
 			join(agentDir, "settings.json"),
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
 		);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
-		process.env.PRIME_AGENT_DOWNLOAD_BASE_URL = baseUrl;
+		process.env.FULCRUM_PACKAGE_DIR = selfPackageDir;
+		process.env.FULCRUM_DOWNLOAD_BASE_URL = baseUrl;
 		Object.defineProperty(process, "execPath", {
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
 		});
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => Response.json({ package: "prime-agent", tarball: tarballPath, version: "0.73.0" })),
+			vi.fn(async () => Response.json({ package: "fulcrum", tarball: tarballPath, version: "0.73.0" })),
 		);
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -378,12 +390,12 @@ else {
 		}
 	});
 
-	it("does not self-update when the same-version manifest uses the Prime Agent package alias", async () => {
+	it("does not self-update when the same-version manifest uses the Fulcrum package alias", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
 		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
 		const recordPath = join(tempDir, "self-update.json");
-		const baseUrl = "https://downloads.example.test/prime-agent";
+		const baseUrl = "https://downloads.example.test/fulcrum";
 		mkdirSync(selfPackageDir, { recursive: true });
 		writeFileSync(
 			fakeNpmPath,
@@ -396,8 +408,8 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			join(agentDir, "settings.json"),
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
 		);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
-		process.env.PRIME_AGENT_DOWNLOAD_BASE_URL = baseUrl;
+		process.env.FULCRUM_PACKAGE_DIR = selfPackageDir;
+		process.env.FULCRUM_DOWNLOAD_BASE_URL = baseUrl;
 		Object.defineProperty(process, "execPath", {
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
@@ -406,8 +418,8 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			"fetch",
 			vi.fn(async () =>
 				Response.json({
-					package: "prime-agent",
-					tarball: "releases/current/prime-agent.tgz",
+					package: "fulcrum",
+					tarball: "releases/current/fulcrum.tgz",
 					version: VERSION,
 				}),
 			),
@@ -452,7 +464,7 @@ if(args.includes("install")) process.exit(23);
 			join(agentDir, "settings.json"),
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
 		);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
+		process.env.FULCRUM_PACKAGE_DIR = selfPackageDir;
 		Object.defineProperty(process, "execPath", {
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,

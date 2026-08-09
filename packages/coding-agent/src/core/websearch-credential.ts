@@ -1,6 +1,4 @@
-// Shared identifiers for the bundled websearch skill's Serper credential, used by
-// the /login UI (auth.json key) and the kernel env injection.
-export const WEBSEARCH_SKILL_NAME = "websearch";
-export const SERPER_CREDENTIAL_ID = "serper";
-export const SERPER_CREDENTIAL_NAME = "Serper (web search)";
-export const SERPER_ENV_VAR = "SERPER_API_KEY";
+// Firecrawl is a host-managed service credential consumed by the built-in
+// websearch and browser Python modules.
+export const FIRECRAWL_CREDENTIAL_ID = "firecrawl";
+export const FIRECRAWL_CREDENTIAL_NAME = "Firecrawl (web search and browser)";

@@ -107,8 +107,14 @@ import {
 	type SessionPassivationSnapshot,
 } from "../../core/session-action-store.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
-import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
 import {
+	acquireSessionLease,
+	canonicalSessionPath,
+	SessionAlreadyActiveError,
+	type SessionLease,
+} from "../../core/session-lease.js";
+import {
+	isDiscardableSessionDraftFile,
 	readSessionInfo,
 	resolveSessionRlmDepth,
 	type SessionInfo,
@@ -336,11 +342,12 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 const DAEMON_CLIENT_CAPABILITY_SET: ReadonlySet<string> = new Set(DAEMON_SUPPORTED_CLIENT_CAPABILITIES);
 const CLIENT_CATCHUP_RETRY_MS = 250;
 const UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS = 5000;
+const EMPTY_DRAFT_DISCARD_DRAIN_TIMEOUT_MS = 5000;
 const SUPERVISOR_FENCE_POLL_MS = 250;
 const UPDATE_RESTART_MARKER =
-	"<prime_agent_update_interrupted>\n" +
-	"Prime Agent was updated and intentionally interrupted this session. Continue from the saved transcript and restored tool/kernel state. Any running model, tool, bash, or child-agent work may have been partially completed.\n" +
-	"</prime_agent_update_interrupted>";
+	"<fulcrum_update_interrupted>\n" +
+	"Fulcrum was updated and intentionally interrupted this session. Continue from the saved transcript and restored tool/kernel state. Any running model, tool, bash, or child-agent work may have been partially completed.\n" +
+	"</fulcrum_update_interrupted>";
 const RECOVERY_CHECKPOINT_EVENTS: ReadonlySet<string> = new Set([
 	"agent_start",
 	"agent_end",
@@ -427,6 +434,8 @@ export class AgentDaemon {
 	private shuttingDown = false;
 	private readonly updateRestartQueuePauses = new Map<string, { release(): void }>();
 	private readonly mutationDrain = new MutationDrainLatch();
+	/** Worker-only admission barrier while a supervisor evaluates a detached empty draft. */
+	private discardingEmptyDraftActiveSessionId?: string;
 	private updateRestart?: {
 		id: symbol;
 		owner?: DaemonSocketClient;
@@ -617,7 +626,7 @@ export class AgentDaemon {
 
 		this.registerSignalHandlers();
 		this.summarizer.start();
-		this.log(`Prime Agent daemon listening on ${this.socketPath}`);
+		this.log(`Fulcrum daemon listening on ${this.socketPath}`);
 		// No startup restore: on-disk sessions return only via --resume or the agents view.
 		if (!this.shuttingDown) {
 			this.cronScheduler.start();
@@ -3250,6 +3259,14 @@ export class AgentDaemon {
 			}
 			if (this.options.worker && typeof parsed.type === "string" && parsed.type.startsWith("worker_")) {
 				const workerCommand = parsed as DaemonWorkerCommand;
+				if (
+					this.discardingEmptyDraftActiveSessionId !== undefined &&
+					workerCommand.type !== "worker_discard_empty_draft" &&
+					workerCommand.type !== "worker_archive_and_shutdown"
+				) {
+					this.write(client, failure(workerCommand.id, workerCommand.type, "Daemon is discarding an empty draft"));
+					return;
+				}
 				const updateLifecycle =
 					workerCommand.type === "worker_prepare_update" ||
 					workerCommand.type === "worker_commit_update" ||
@@ -3283,6 +3300,11 @@ export class AgentDaemon {
 		}
 
 		const mutation = command.type !== "prepare_update_restart" && isDaemonMutatingCommand(command);
+		if (mutation && command.type !== "shutdown" && this.discardingEmptyDraftActiveSessionId !== undefined) {
+			clearParsedAdmission();
+			this.write(client, failure(command.id, command.type, "Daemon is discarding an empty draft"));
+			return;
+		}
 		const restartPhase = this.updateRestart?.phase;
 		// Mirror the supervisor's drain/fence split: abort-style commands stay
 		// admitted only while mutations drain; once the checkpoint is being
@@ -3365,6 +3387,14 @@ export class AgentDaemon {
 					}
 					this.writeWorkerSuccess(client, command);
 					setImmediate(() => void this.shutdown(0));
+					return;
+				}
+				case "worker_discard_empty_draft": {
+					const discarded = await this.discardEmptyWorkerDraft(command.activeSessionId);
+					this.writeWorkerSuccess(client, command, { discarded });
+					if (discarded) {
+						setImmediate(() => void this.shutdown(0));
+					}
 					return;
 				}
 				case "worker_passivate_idle_children": {
@@ -5608,6 +5638,52 @@ export class AgentDaemon {
 		return !this.hasScheduledJobsForSession(state.activeSessionId);
 	}
 
+	private hasRecoverableSessionWork(state: ActiveSessionState): boolean {
+		const session = state.runtime.session;
+		const actions = session.getSessionActionRecoverySnapshot();
+		return (
+			session.isStreaming ||
+			session.isCompacting ||
+			session.isBashRunning ||
+			session.hasRunningRlmChildren() ||
+			session.isRetrying ||
+			session.hasAcceptedPromptInFlight ||
+			actions.actions.length > 0 ||
+			session.getPendingNextTurnMessageSnapshots().length > 0
+		);
+	}
+
+	private async discardEmptyWorkerDraft(activeSessionId: string): Promise<boolean> {
+		const state = this.sessions.get(activeSessionId);
+		if (
+			!this.options.worker ||
+			!state ||
+			this.sessions.size !== 1 ||
+			state.runtime.metadata.kind === "subagent" ||
+			this.discardingEmptyDraftActiveSessionId !== undefined
+		) {
+			return false;
+		}
+		this.discardingEmptyDraftActiveSessionId = activeSessionId;
+		try {
+			await this.mutationDrain.waitForDrain(
+				1,
+				AbortSignal.timeout(EMPTY_DRAFT_DISCARD_DRAIN_TIMEOUT_MS),
+				"Timed out draining daemon mutations for empty draft discard",
+			);
+			if (this.hasRecoverableSessionWork(state) || !this.isEmptyDraftContent(state)) {
+				state.runtime.session.sessionManager.flushNow();
+				return false;
+			}
+			await this.closeSession(state, "shutdown");
+			return true;
+		} finally {
+			if (this.discardingEmptyDraftActiveSessionId === activeSessionId) {
+				this.discardingEmptyDraftActiveSessionId = undefined;
+			}
+		}
+	}
+
 	private createUpdateRestartSession(state: ActiveSessionState): DaemonUpdateRestartSession | undefined {
 		const session = state.runtime.session;
 		const queue = {
@@ -5666,7 +5742,7 @@ export class AgentDaemon {
 			return;
 		}
 		state.runtime.session.sessionManager.appendCustomMessageEntry(
-			"prime-agent.update_restart",
+			"fulcrum.update_restart",
 			UPDATE_RESTART_MARKER,
 			false,
 			{
@@ -6013,6 +6089,41 @@ export class AgentDaemon {
 		}
 	}
 
+	private async deleteDiscardableSessionFile(
+		sessionFile: string,
+		activeSessionId: string,
+		artifactSessionId: string,
+		agentDir: string,
+	): Promise<void> {
+		let cleanupLease: SessionLease | undefined;
+		try {
+			cleanupLease = acquireSessionLease(sessionFile, agentDir, {
+				...process.env,
+				[SESSION_LEASES_ENABLED_ENV]: "1",
+				[SESSION_LEASE_OWNER_ID_ENV]: activeSessionId,
+			});
+		} catch (error) {
+			if (!(error instanceof SessionAlreadyActiveError)) {
+				this.log(`Could not lease empty draft ${sessionFile}: ${String(error)}`);
+			}
+			return;
+		}
+		if (!cleanupLease) return;
+		try {
+			if (this.hasScheduledJobsForSession(activeSessionId) || !(await isDiscardableSessionDraftFile(sessionFile))) {
+				return;
+			}
+			const result = await deleteSessionFile(sessionFile, {
+				artifactSessionId,
+			});
+			if (!result.ok) this.log(`Could not discard empty draft ${sessionFile}: ${result.error}`);
+		} catch (error) {
+			this.log(`Could not discard empty draft ${sessionFile}: ${String(error)}`);
+		} finally {
+			cleanupLease.release();
+		}
+	}
+
 	private async closeSessionOnce(
 		state: ActiveSessionState,
 		reason: DaemonSessionClosedReason,
@@ -6035,11 +6146,24 @@ export class AgentDaemon {
 			? await this.closeChildSessions(state, reason, waitForAbort, descendants)
 			: undefined;
 		// Empty draft (no messages, config, or jobs): discard rather than persist an
-		// empty session file. Mirrors the detach-time discard so a config-bearing
-		// draft closed via kill/completed is never wiped.
+		// empty session file. Worker shutdowns use the same guard after the supervisor
+		// verifies a detached bootstrap-only draft, so config-bearing drafts are never wiped.
 		const keepsResumeEntry = this.closeKeepsResumeEntry(reason);
-		const isEmptyDraftSession = !keepsResumeEntry && this.isEmptyDraftContent(state);
+		const isEmptyDraftSession =
+			!this.hasRecoverableSessionWork(state) &&
+			this.isEmptyDraftContent(state) &&
+			(!keepsResumeEntry || (this.options.worker !== undefined && reason === "shutdown"));
 		let persistError: unknown;
+		// Pre-assistant configuration changes are buffered by SessionManager. A resumable
+		// shutdown must flush them before disposing the runtime.
+		if (keepsResumeEntry && !isEmptyDraftSession) {
+			try {
+				state.runtime.session.sessionManager.flushNow();
+			} catch (error) {
+				persistError = error;
+				this.log(`Could not flush resumable session ${state.activeSessionId}: ${String(error)}`);
+			}
+		}
 		// Clean shutdown leaves the session un-archived so it stays in the resume list.
 		if (!keepsResumeEntry && !isEmptyDraftSession) {
 			try {
@@ -6084,7 +6208,12 @@ export class AgentDaemon {
 		if (isEmptyDraftSession) {
 			const sessionFile = state.runtime.session.sessionFile;
 			if (sessionFile) {
-				await deleteSessionFile(sessionFile).catch(() => undefined);
+				await this.deleteDiscardableSessionFile(
+					sessionFile,
+					state.activeSessionId,
+					state.runtime.session.sessionManager.getSessionId(),
+					state.runtime.services.agentDir,
+				);
 			}
 		}
 		if (disposeError) {

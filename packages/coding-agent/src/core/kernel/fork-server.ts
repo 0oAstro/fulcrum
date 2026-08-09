@@ -40,10 +40,10 @@ export class ForkServerUnavailable extends Error {
 }
 
 // On by default on Linux (fork-without-exec is unsafe on macOS);
-// PRIME_AGENT_KERNEL_FORKSERVER=0 opts out.
+// FULCRUM_KERNEL_FORKSERVER=0 opts out.
 export function isForkServerEnabled(): boolean {
 	if (process.platform !== "linux") return false;
-	return process.env.PRIME_AGENT_KERNEL_FORKSERVER !== "0";
+	return process.env.FULCRUM_KERNEL_FORKSERVER !== "0";
 }
 
 // A forkserver template is defined solely by the interpreter — the imported
@@ -123,7 +123,7 @@ class ForkServer {
 	}
 
 	private start(): Promise<void> {
-		this.socketDir = mkdtempSync(join(tmpdir(), "prime-agent-forkserver-"));
+		this.socketDir = mkdtempSync(join(tmpdir(), "fulcrum-forkserver-"));
 		const socketPath = join(this.socketDir, "control.sock");
 
 		return new Promise<void>((resolve, reject) => {

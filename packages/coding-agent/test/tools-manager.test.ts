@@ -3,14 +3,14 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const toolState = vi.hoisted(() => ({
-	toolsDir: `/tmp/prime-agent-tools-manager-${process.pid}`,
+	toolsDir: `/tmp/fulcrum-tools-manager-${process.pid}`,
 	platform: "linux",
 	architecture: "x64",
 	extractZip: async (_source: string, _options: { dir: string }): Promise<void> => {},
 }));
 
 vi.mock("../src/config.js", () => ({
-	APP_NAME: "prime-agent",
+	APP_NAME: "fulcrum",
 	getBinDir: () => toolState.toolsDir,
 }));
 
@@ -31,7 +31,7 @@ import {
 } from "../src/utils/tools-manager.js";
 
 const originalPath = process.env.PATH;
-const originalOffline = process.env.PI_OFFLINE;
+const originalOffline = process.env.FULCRUM_OFFLINE;
 const pathDir = join(toolState.toolsDir, "path");
 
 function writeExecutable(filePath: string, exitCode = 0): void {
@@ -51,7 +51,7 @@ describe("tools manager", () => {
 		rmSync(toolState.toolsDir, { recursive: true, force: true });
 		mkdirSync(pathDir, { recursive: true });
 		process.env.PATH = pathDir;
-		delete process.env.PI_OFFLINE;
+		delete process.env.FULCRUM_OFFLINE;
 		toolState.platform = "linux";
 		toolState.architecture = "x64";
 		toolState.extractZip = async () => {};
@@ -61,8 +61,8 @@ describe("tools manager", () => {
 		vi.unstubAllGlobals();
 		if (originalPath === undefined) delete process.env.PATH;
 		else process.env.PATH = originalPath;
-		if (originalOffline === undefined) delete process.env.PI_OFFLINE;
-		else process.env.PI_OFFLINE = originalOffline;
+		if (originalOffline === undefined) delete process.env.FULCRUM_OFFLINE;
+		else process.env.FULCRUM_OFFLINE = originalOffline;
 		rmSync(toolState.toolsDir, { recursive: true, force: true });
 	});
 
@@ -81,14 +81,14 @@ describe("tools manager", () => {
 	});
 
 	it("reports offline and Termux provisioning constraints", async () => {
-		process.env.PI_OFFLINE = "1";
+		process.env.FULCRUM_OFFLINE = "1";
 		await expect(ensureToolWithStatus("rg")).resolves.toMatchObject({
 			status: "unavailable",
 			reason: "offline",
 			platform: "linux",
 		});
 
-		delete process.env.PI_OFFLINE;
+		delete process.env.FULCRUM_OFFLINE;
 		toolState.platform = "android";
 		await expect(ensureToolWithStatus("rg")).resolves.toMatchObject({
 			status: "unavailable",
@@ -171,6 +171,6 @@ describe("tools manager", () => {
 		expect(linux).toContain("sudo dnf install ripgrep");
 		expect(windows).toContain("winget install BurntSushi.ripgrep.MSVC");
 		expect(termux).toContain("pkg install ripgrep");
-		expect(mac).toContain("Prime Agent and subagents remain available");
+		expect(mac).toContain("Fulcrum and subagents remain available");
 	});
 });

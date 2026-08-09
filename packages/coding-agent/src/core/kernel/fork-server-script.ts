@@ -41,6 +41,7 @@ def _import_template():
     import ipykernel.kernelapp  # noqa: F401
     import jupyter_client  # noqa: F401
     import nest_asyncio  # noqa: F401
+    import types  # noqa: F401
     try:
         import rlm  # noqa: F401
     except Exception:

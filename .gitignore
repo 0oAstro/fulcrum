@@ -36,7 +36,7 @@ out.html
 packages/coding-agent/binaries/
 todo.md
 plans/
-.prime/agent/
+.fulcrum/
 collect.sh
 .kernel-venv/
 .worktrees/

@@ -15,6 +15,7 @@ import {
 import { handleDaemonCommand } from "./daemon-command.js";
 import { runPs, runReap, runShutdownAll } from "./daemon-ps.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "./daemon-update-restart.js";
+import { handleGatewayCommand } from "./gateway-command.js";
 
 export interface PublicCommandResult {
 	handled: boolean;
@@ -103,6 +104,9 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return runNestedAgentCommand("schedule", "cron", args.slice(1));
 		case "status":
 			return runStatus(args.slice(1));
+		case "gateway":
+			await handleGatewayCommand(args.slice(1));
+			return HANDLED;
 		case "doctor":
 			return runDoctor(args.slice(1));
 		case "shutdown":
@@ -118,7 +122,7 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			);
 			if (hasLegacySelfTarget && hasLegacyPackageTarget) {
 				return fail(
-					"Prime Agent and package updates are now separate.",
+					"Fulcrum and package updates are now separate.",
 					`Run "${APP_NAME} update [--force]" and "${APP_NAME} package update [source]" separately.`,
 				);
 			}
@@ -199,15 +203,15 @@ function rejectRemovedCommand(args: string[]): PublicCommandResult {
 	const [command, subcommand] = args;
 	let replacement: string | undefined;
 	if (command === "daemon") {
-		replacement = 'Run "prime-agent help" to see the agent commands.';
+		replacement = 'Run "fulcrum help" to see the agent commands.';
 	} else if (command === "app" && subcommand === "update") {
-		replacement = 'Use "prime-agent update".';
+		replacement = 'Use "fulcrum update".';
 	} else if (command === "install") {
-		replacement = 'Use "prime-agent package install".';
+		replacement = 'Use "fulcrum package install".';
 	} else if (command === "remove" || command === "uninstall") {
-		replacement = 'Use "prime-agent package remove".';
+		replacement = 'Use "fulcrum package remove".';
 	} else if (command === "manage") {
-		replacement = 'Use "prime-agent agents".';
+		replacement = 'Use "fulcrum agents".';
 	}
 	return fail(`Unknown command: ${args.slice(0, 2).join(" ")}`, replacement);
 }
@@ -286,15 +290,13 @@ async function runPackage(args: string[]): Promise<PublicCommandResult> {
 		if (
 			rest.some((arg) => arg === "--self" || arg === "--extensions" || arg === "--extension" || arg === "--force")
 		) {
-			return fail(
-				'Package updates accept only an optional source. Use "prime-agent update --force" to update Prime Agent.',
-			);
+			return fail('Package updates accept only an optional source. Use "fulcrum update --force" to update Fulcrum.');
 		}
 		if (rest.length > 1) {
 			return fail(`Usage: ${APP_NAME} package update [source]`);
 		}
 		if (rest[0] && isSelfUpdateSource(rest[0])) {
-			return fail('Use "prime-agent update" to update Prime Agent.');
+			return fail('Use "fulcrum update" to update Fulcrum.');
 		}
 		await handlePackageCommand(["update", ...(rest.length === 0 ? ["--extensions"] : rest)]);
 		return HANDLED;

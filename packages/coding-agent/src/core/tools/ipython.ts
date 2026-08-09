@@ -23,30 +23,33 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const RLM_BOOTSTRAP_BASE_CODE = `
 import asyncio
-import os as _prime_agent_os
+import os as _fulcrum_os
+import sys as _fulcrum_sys
+import types as _fulcrum_types
 
-_prime_agent_os.environ["NO_COLOR"] = "1"
+_fulcrum_os.environ["NO_COLOR"] = "1"
 get_ipython().colors = "nocolor"
 
 try:
-    import nest_asyncio as _prime_agent_nest_asyncio
-    _prime_agent_nest_asyncio.apply()
+    import nest_asyncio as _fulcrum_nest_asyncio
+    _fulcrum_nest_asyncio.apply()
 except Exception:
     pass
 
 try:
-    import rlm as _prime_agent_rlm_module
-    rlm = _prime_agent_rlm_module.rlm
-except Exception as _prime_agent_rlm_error:
-    _PRIME_AGENT_RLM_IMPORT_ERROR = str(_prime_agent_rlm_error)
+    import rlm as _fulcrum_rlm_module
+    rlm = _fulcrum_rlm_module.rlm
+    _fulcrum_host_request = _fulcrum_rlm_module.host_request
+except Exception as _fulcrum_rlm_error:
+    _FULCRUM_RLM_IMPORT_ERROR = str(_fulcrum_rlm_error)
 
-    class _PrimeAgentMissingRlm:
+    class _FulcrumMissingRlm:
         def _raise_missing(self):
             raise RuntimeError(
-                "prime-agent-runtime is not installed in this IPython kernel. "
-                "Remove ~/.prime/agent/kernel-venv so prime-agent can rebuild it, or set "
-                "PRIME_AGENT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
-                f"Import error: {_PRIME_AGENT_RLM_IMPORT_ERROR}"
+                "fulcrum-runtime is not installed in this IPython kernel. "
+                "Remove ~/.fulcrum/kernel-venv so fulcrum can rebuild it, or set "
+                "FULCRUM_KERNEL_PYTHON to a kernel environment with fulcrum-runtime installed. "
+                f"Import error: {_FULCRUM_RLM_IMPORT_ERROR}"
             )
 
         async def run(self, prompt, **kwargs):
@@ -64,7 +67,96 @@ except Exception as _prime_agent_rlm_error:
         async def __call__(self, prompt, **kwargs):
             return await self.run(prompt, **kwargs)
 
-    rlm = _PrimeAgentMissingRlm()
+    rlm = _FulcrumMissingRlm()
+
+    async def _fulcrum_host_request(request_type, payload):
+        rlm._raise_missing()
+
+async def _fulcrum_websearch_search(
+    query,
+    limit=5,
+    include_domains=None,
+    exclude_domains=None,
+    recency=None,
+):
+    """Search the web through Fulcrum's host integration.
+
+    Args:
+        query: Search query.
+        limit: Maximum number of results (default 5).
+        include_domains: Optional domains to include.
+        exclude_domains: Optional domains to exclude.
+        recency: Optional recency filter supported by the host integration.
+    """
+    payload = {"query": query, "limit": limit}
+    if include_domains is not None:
+        payload["include_domains"] = include_domains
+    if exclude_domains is not None:
+        payload["exclude_domains"] = exclude_domains
+    if recency is not None:
+        payload["recency"] = recency
+    return (await _fulcrum_host_request("websearch.search", payload))["text"]
+
+async def _fulcrum_websearch_research(
+    topic, queries=None, max_queries=4, follow_up_queries=2, results_per_query=5, max_sources=8,
+    instruction=None, include_domains=None, exclude_domains=None, recency=None,
+):
+    """Research a topic across an orthogonal query matrix and return a compact cited synthesis."""
+    payload = {"topic": topic, "max_queries": max_queries, "follow_up_queries": follow_up_queries, "results_per_query": results_per_query, "max_sources": max_sources}
+    for key, value in {"queries": queries, "instruction": instruction, "include_domains": include_domains, "exclude_domains": exclude_domains, "recency": recency}.items():
+        if value is not None:
+            payload[key] = value
+    return (await _fulcrum_host_request("websearch.research", payload))["text"]
+
+async def _fulcrum_websearch_open(url, formats=["markdown"], only_main_content=True):
+    """Open and extract a web page through Fulcrum's host integration.
+
+    Args:
+        url: Page URL.
+        formats: Requested extraction formats (default ['markdown']).
+        only_main_content: Exclude navigation and other boilerplate when true.
+    """
+    return (await _fulcrum_host_request(
+        "websearch.open",
+        {"url": url, "formats": formats, "only_main_content": only_main_content},
+    ))["text"]
+
+async def _fulcrum_browser_fetch(url, instruction="Extract the useful page content.", max_output=12000):
+    """Fetch a clean page and extract useful content with the cheapest configured text model."""
+    return (await _fulcrum_host_request(
+        "websearch.fetch",
+        {"url": url, "instruction": instruction, "max_output": max_output},
+    ))["text"]
+
+async def _fulcrum_websearch_map(url, limit=100):
+    """Discover URLs on a site through Fulcrum's host integration.
+
+    Args:
+        url: Site URL.
+        limit: Maximum number of discovered URLs (default 100).
+    """
+    return await _fulcrum_host_request("websearch.map", {"url": url, "limit": limit})
+
+def _fulcrum_builtin_module(name, doc, functions):
+    module = _fulcrum_types.ModuleType(name, doc)
+    for function_name, function in functions.items():
+        function.__name__ = function_name
+        function.__qualname__ = function_name
+        function.__module__ = name
+        setattr(module, function_name, function)
+    _fulcrum_sys.modules[name] = module
+    return module
+
+websearch = _fulcrum_builtin_module(
+    "websearch",
+    "Persistent first-party web discovery, page, site-map, and research helpers backed by Fulcrum host requests.",
+    {"search": _fulcrum_websearch_search, "open": _fulcrum_websearch_open, "map": _fulcrum_websearch_map, "research": _fulcrum_websearch_research},
+)
+browser = _fulcrum_builtin_module(
+    "browser",
+    "Persistent first-party browser helpers backed by Fulcrum host requests.",
+    {"fetch": _fulcrum_browser_fetch},
+)
 `.trim();
 
 export function buildRlmBootstrapCode(pythonSkills: readonly PythonSkillRuntimeInfo[] = []): string {
@@ -76,66 +168,63 @@ export function buildRlmBootstrapCode(pythonSkills: readonly PythonSkillRuntimeI
 	return `
 ${RLM_BOOTSTRAP_BASE_CODE}
 
-import importlib as _prime_agent_importlib
-import inspect as _prime_agent_inspect
-import sys as _prime_agent_sys
-import types as _prime_agent_types
-
-class _PrimeAgentCallableSkillModule(_prime_agent_types.ModuleType):
+import importlib as _fulcrum_importlib
+import inspect as _fulcrum_inspect
+class _FulcrumCallableSkillModule(_fulcrum_types.ModuleType):
     async def __call__(self, *args, **kwargs):
         result = self.run(*args, **kwargs)
-        if _prime_agent_inspect.isawaitable(result):
+        if _fulcrum_inspect.isawaitable(result):
             return await result
         return result
 
-class _PrimeAgentUnavailableSkill:
+class _FulcrumUnavailableSkill:
     def __init__(self, name, error):
         self.__name__ = name
-        self._prime_agent_import_error = error
+        self._fulcrum_import_error = error
         self.__doc__ = f"Python skill {name} is unavailable: {error}"
 
     async def run(self, *args, **kwargs):
         raise RuntimeError(
             f"Python skill {self.__name__} is unavailable in this IPython kernel. "
-            f"Import error: {self._prime_agent_import_error}"
+            f"Import error: {self._fulcrum_import_error}"
         )
 
     async def __call__(self, *args, **kwargs):
         return await self.run(*args, **kwargs)
 
     def __repr__(self):
-        return f"<unavailable Python skill {self.__name__!r}: {self._prime_agent_import_error}>"
+        return f"<unavailable Python skill {self.__name__!r}: {self._fulcrum_import_error}>"
 
-def _prime_agent_wrap_skill_module(module):
+def _fulcrum_wrap_skill_module(module):
     run = getattr(module, "run", None)
     if not callable(run):
         return module
-    if isinstance(module, _PrimeAgentCallableSkillModule):
+    if isinstance(module, _FulcrumCallableSkillModule):
         return module
-    wrapped = _PrimeAgentCallableSkillModule(module.__name__)
+    wrapped = _FulcrumCallableSkillModule(module.__name__)
     wrapped.__dict__.update(module.__dict__)
     try:
-        wrapped.__signature__ = _prime_agent_inspect.signature(run)
+        wrapped.__signature__ = _fulcrum_inspect.signature(run)
     except Exception:
         pass
     doc = getattr(run, "__doc__", None)
     if doc:
         wrapped.__doc__ = doc
-    _prime_agent_sys.modules[module.__name__] = wrapped
+    _fulcrum_sys.modules[module.__name__] = wrapped
     return wrapped
 
-_PRIME_AGENT_SKILL_IMPORT_ERRORS = {}
+_FULCRUM_SKILL_IMPORT_ERRORS = {}
 
-for _prime_agent_skill_name in ${JSON.stringify(importNames)}:
+for _fulcrum_skill_name in ${JSON.stringify(importNames)}:
     try:
-        globals()[_prime_agent_skill_name] = _prime_agent_wrap_skill_module(
-            _prime_agent_importlib.import_module(_prime_agent_skill_name)
+        globals()[_fulcrum_skill_name] = _fulcrum_wrap_skill_module(
+            _fulcrum_importlib.import_module(_fulcrum_skill_name)
         )
-    except Exception as _prime_agent_skill_error:
-        _PRIME_AGENT_SKILL_IMPORT_ERRORS[_prime_agent_skill_name] = str(_prime_agent_skill_error)
-        globals()[_prime_agent_skill_name] = _PrimeAgentUnavailableSkill(
-            _prime_agent_skill_name,
-            str(_prime_agent_skill_error),
+    except Exception as _fulcrum_skill_error:
+        _FULCRUM_SKILL_IMPORT_ERRORS[_fulcrum_skill_name] = str(_fulcrum_skill_error)
+        globals()[_fulcrum_skill_name] = _FulcrumUnavailableSkill(
+            _fulcrum_skill_name,
+            str(_fulcrum_skill_error),
         )
 `.trim();
 }

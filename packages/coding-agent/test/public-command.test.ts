@@ -21,7 +21,7 @@ vi.mock("../src/package-manager-cli.js", () => ({
 		mocks.packageCommands.push(args);
 		return true;
 	},
-	isSelfUpdateSource: (source: string) => source === "self" || source === "pi" || source === "prime-agent",
+	isSelfUpdateSource: (source: string) => source === "self" || source === "pi" || source === "fulcrum",
 }));
 
 vi.mock("../src/cli/daemon-ps.js", () => ({
@@ -79,7 +79,7 @@ describe("public command routing", () => {
 	it("rejects extra attach operands", async () => {
 		await expect(handlePublicCommand(["attach", "worker", "extra"])).resolves.toMatchObject({ handled: true });
 		expect(process.exitCode).toBe(1);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("prime-agent attach <agent>"));
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("fulcrum attach <agent>"));
 	});
 
 	it("rejects conflicting session selectors when attaching", async () => {
@@ -121,7 +121,7 @@ describe("public command routing", () => {
 		]);
 	});
 
-	it("separates Prime Agent updates from package updates", async () => {
+	it("separates Fulcrum updates from package updates", async () => {
 		await handlePublicCommand(["update", "--force"]);
 		await handlePublicCommand(["package", "update"]);
 		await handlePublicCommand(["package", "update", "npm:@example/tools"]);
@@ -160,12 +160,12 @@ describe("public command routing", () => {
 	});
 
 	it("gives legacy update targets explicit migration guidance", async () => {
-		for (const target of ["self", "--self", "prime-agent"]) {
+		for (const target of ["self", "--self", "fulcrum"]) {
 			await handlePublicCommand(["update", target]);
 		}
 
 		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "prime-agent update [--force]"'));
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "fulcrum update [--force]"'));
 	});
 
 	it("directs legacy package-update forms to the package command", async () => {
@@ -174,7 +174,7 @@ describe("public command routing", () => {
 		await handlePublicCommand(["update", "--extension", "npm:@example/tools"]);
 
 		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "prime-agent package update [source]"'));
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "fulcrum package update [source]"'));
 	});
 
 	it("explains that combined legacy updates are now separate", async () => {
@@ -185,19 +185,19 @@ describe("public command routing", () => {
 	});
 
 	it("rejects self-update aliases on the package update path", async () => {
-		for (const source of ["self", "pi", "prime-agent"]) {
+		for (const source of ["self", "pi", "fulcrum"]) {
 			await handlePublicCommand(["package", "update", source]);
 		}
 
 		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "prime-agent update"'));
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "fulcrum update"'));
 	});
 
 	it("directs package uninstall to package remove", async () => {
 		await handlePublicCommand(["package", "uninstall", "npm:@example/tools"]);
 
 		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "prime-agent package remove"'));
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "fulcrum package remove"'));
 		expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining("package install"));
 	});
 
@@ -229,7 +229,7 @@ describe("public command routing", () => {
 		await handlePublicCommand(["package", "list", "ignored-source"]);
 
 		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("prime-agent package list"));
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("fulcrum package list"));
 	});
 
 	it("uses force only when explicitly requested for full shutdown", async () => {
@@ -249,17 +249,17 @@ describe("public command routing", () => {
 	it("rejects the old daemon hierarchy with migration guidance", async () => {
 		await expect(handlePublicCommand(["daemon", "list"])).resolves.toMatchObject({ handled: true });
 		expect(process.exitCode).toBe(1);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Run "prime-agent help"'));
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Run "fulcrum help"'));
 	});
 
 	it("shows migration guidance when help targets removed commands", async () => {
 		const cases: Array<[path: string[], hint: string]> = [
-			[["daemon"], 'Run "prime-agent help"'],
-			[["install"], 'Use "prime-agent package install"'],
-			[["remove"], 'Use "prime-agent package remove"'],
-			[["uninstall"], 'Use "prime-agent package remove"'],
-			[["manage"], 'Use "prime-agent agents"'],
-			[["app", "update"], 'Use "prime-agent update"'],
+			[["daemon"], 'Run "fulcrum help"'],
+			[["install"], 'Use "fulcrum package install"'],
+			[["remove"], 'Use "fulcrum package remove"'],
+			[["uninstall"], 'Use "fulcrum package remove"'],
+			[["manage"], 'Use "fulcrum agents"'],
+			[["app", "update"], 'Use "fulcrum update"'],
 		];
 
 		for (const [path, hint] of cases) {
@@ -302,9 +302,9 @@ describe("public command routing", () => {
 		await handlePublicCommand(["doctor", "--fix", "--help"]);
 		await handlePublicCommand(["package", "install", "--local", "--help"]);
 
-		expect(console.log).toHaveBeenNthCalledWith(1, expect.stringContaining("prime-agent list [--all] [--json]"));
-		expect(console.log).toHaveBeenNthCalledWith(2, expect.stringContaining("prime-agent doctor [--fix] [--json]"));
-		expect(console.log).toHaveBeenNthCalledWith(3, expect.stringContaining("prime-agent package install <source>"));
+		expect(console.log).toHaveBeenNthCalledWith(1, expect.stringContaining("fulcrum list [--all] [--json]"));
+		expect(console.log).toHaveBeenNthCalledWith(2, expect.stringContaining("fulcrum doctor [--fix] [--json]"));
+		expect(console.log).toHaveBeenNthCalledWith(3, expect.stringContaining("fulcrum package install <source>"));
 		expect(console.error).not.toHaveBeenCalled();
 	});
 

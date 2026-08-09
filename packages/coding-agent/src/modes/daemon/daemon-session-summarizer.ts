@@ -9,9 +9,6 @@ const SWEEP_INTERVAL_MS = 25_000;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
 
-const SUMMARY_MODEL_PROVIDER = "prime-inference";
-const SUMMARY_MODEL_ID = "qwen/qwen3-30b-a3b-instruct-2507";
-
 const SUMMARY_CONTEXT_MESSAGES = 8;
 const SUMMARY_MAX_CHARS_PER_MESSAGE = 600;
 // Generous so a chatty model still closes the tags before truncation.
@@ -37,13 +34,18 @@ export interface AgentStatusResult {
 	taskState?: AgentTaskState;
 }
 
-/** Resolve the cheap summary model, or undefined when it has no configured auth. */
+/** Resolve the cheapest configured text model, or undefined when none is available. */
 export function resolveSummaryModel(registry: ModelRegistry): Model<Api> | undefined {
-	const model = registry.find(SUMMARY_MODEL_PROVIDER, SUMMARY_MODEL_ID);
-	if (model && registry.hasConfiguredAuth(model)) {
-		return model;
-	}
-	return undefined;
+	return registry
+		.getAvailable()
+		.filter((model) => model.input.includes("text"))
+		.sort(
+			(left, right) =>
+				left.cost.output - right.cost.output ||
+				left.cost.input - right.cost.input ||
+				left.provider.localeCompare(right.provider) ||
+				left.id.localeCompare(right.id),
+		)[0];
 }
 
 function messageText(content: unknown): { text: string; tools: string[] } {

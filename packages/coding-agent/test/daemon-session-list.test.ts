@@ -670,7 +670,7 @@ describe("resolveAttachModelFallbackMessage", () => {
 	});
 
 	it("ignores the attaching process's snapshot when the session has a model", () => {
-		const summary = makeSummary({ model: { provider: "prime-inference", id: "gpt-5.5" } as SessionSummary["model"] });
+		const summary = makeSummary({ model: { provider: "anthropic", id: "gpt-5.5" } as SessionSummary["model"] });
 
 		expect(resolveAttachModelFallbackMessage(summary, startupMessage)).toBeUndefined();
 	});

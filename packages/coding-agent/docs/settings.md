@@ -1,11 +1,11 @@
 # Settings
 
-Prime Agent uses JSON settings files with project settings overriding global settings.
+Fulcrum uses JSON settings files with project settings overriding global settings.
 
 | Location | Scope |
 |----------|-------|
-| `~/.prime/agent/settings.json` | Global (all projects) |
-| `.prime/agent/settings.json` | Project (current directory) |
+| `~/.fulcrum/settings.json` | Global (all projects) |
+| `.fulcrum/settings.json` | Project (current directory) |
 
 Edit directly or use `/settings` for common options.
 
@@ -34,6 +34,22 @@ Edit directly or use `/settings` for common options.
 }
 ```
 
+### Web Research
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `websearch.researchModel` | string | - | Exact model ID or `provider/model` reference used for both research query planning and cited synthesis |
+
+```json
+{
+  "websearch": {
+    "researchModel": "openai/gpt-5.4"
+  }
+}
+```
+
+The reference follows the same exact model-reference rules as model selection: use `provider/model` when a bare ID is ambiguous. Fulcrum never substitutes another model. If the setting is absent, does not resolve, or lacks authentication, explicit research queries still run and return a deterministic evidence matrix; without explicit queries, research performs one topic search before scraping selected evidence.
+
 ### UI & Display
 
 | Setting | Type | Default | Description |
@@ -48,51 +64,21 @@ Edit directly or use `/settings` for common options.
 
 ### Update Checks
 
-Stable builds fetch the release manifest at `https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/latest.json`. Beta builds fetch `beta.json` and continue following beta updates. Override the base URL with `PRIME_AGENT_DOWNLOAD_BASE_URL`.
+Stable builds fetch the release manifest at `https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/latest.json`. Beta builds fetch `beta.json` and continue following beta updates. Override the base URL with `FULCRUM_DOWNLOAD_BASE_URL`.
 
-Set `PI_SKIP_VERSION_CHECK=1` to disable the Prime Agent version update check. Use `--offline` or `PI_OFFLINE=1` to disable startup network operations, including update checks and package update checks.
+Set `PI_SKIP_VERSION_CHECK=1` to disable the Fulcrum version update check. Use `--offline` or `PI_OFFLINE=1` to disable startup network operations, including update checks and package update checks.
 
 The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 
 ```json
 {
   "version": "0.73.1",
-  "package": "prime-agent",
-  "tarball": "releases/v0.73.1/prime-agent-0.73.1.tgz"
+  "package": "fulcrum",
+  "tarball": "releases/v0.73.1/fulcrum-0.73.1.tgz"
 }
 ```
 
-`version` is required. `package` is optional and may also be named `packageName`; it defaults to the current package name. `tarball` is optional; when present, Prime Agent installs that tarball instead of the package name. Relative tarball paths resolve against `PRIME_AGENT_DOWNLOAD_BASE_URL`.
-
-### Pseudonymous usage analytics
-
-Prime Agent sends pseudonymous, aggregate usage and performance events to Prime Intellect. These events include version and operating-system category, onboarding outcome and duration, execution mode (`interactive`, `print`, `json`, `rpc`, or `acp`), run outcomes, TTFT and latency, prompt and turn counts, token usage, tool success counts, retries, and compactions.
-
-Prime Agent does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.prime/agent/`).
-
-Telemetry can be disabled globally or for an individual project. Project settings can only further restrict telemetry: they cannot re-enable a global opt-out or suppress the global one-time disclosure.
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `telemetry.enabled` | boolean | `true` | Send pseudonymous aggregate usage and performance events |
-
-Disable analytics with any of:
-
-```json
-{
-  "telemetry": {
-    "enabled": false
-  }
-}
-```
-
-```bash
-PRIME_AGENT_TELEMETRY=0 prime-agent
-DO_NOT_TRACK=1 prime-agent
-prime-agent --offline
-```
-
-`PRIME_AGENT_TELEMETRY_ENDPOINT` overrides the ingestion endpoint for development and self-hosted deployments.
+`version` is required. `package` is optional and may also be named `packageName`; it defaults to the current package name. `tarball` is optional; when present, Fulcrum installs that tarball instead of the package name. Relative tarball paths resolve against `FULCRUM_DOWNLOAD_BASE_URL`.
 
 ### Warnings
 
@@ -202,7 +188,7 @@ Normally the package manager's global modules location is queried using `root -g
 |---------|------|---------|-------------|
 | `idleEvictionMinutes` | number or `"off"` | `90` | Idle threshold in minutes for whole-tree worker eviction and individual idle-child passivation; `"off"` disables both. |
 
-`idleEvictionMinutes` is a global daemon policy and is read only from `~/.prime/agent/settings.json`. Set it to a positive number to configure the idle threshold.
+`idleEvictionMinutes` is a global daemon policy and is read only from `~/.fulcrum/settings.json`. Set it to a positive number to configure the idle threshold.
 
 ### Sessions
 
@@ -211,10 +197,10 @@ Normally the package manager's global modules location is queried using `root -g
 | `sessionDir` | string | - | Directory where session files are stored. Accepts absolute or relative paths, plus `~`. |
 
 ```json
-{ "sessionDir": ".prime/agent/sessions" }
+{ "sessionDir": ".fulcrum/sessions" }
 ```
 
-When multiple sources specify a session directory, precedence is `--session-dir`, `PRIME_AGENT_SESSION_DIR`, the legacy `PRIME_AGENT_CODING_AGENT_SESSION_DIR`, then `sessionDir` in `settings.json`.
+When multiple sources specify a session directory, precedence is `--session-dir`, `FULCRUM_SESSION_DIR`, the legacy `FULCRUM_CODING_AGENT_SESSION_DIR`, then `sessionDir` in `settings.json`.
 
 ### Model Cycling
 
@@ -238,7 +224,7 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 
 These settings define where to load extensions, skills, prompts, and themes from.
 
-Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Paths in `.prime/agent/settings.json` resolve relative to `.prime/agent`. Absolute paths and `~` are supported.
+Paths in `~/.fulcrum/settings.json` resolve relative to `~/.fulcrum`. Paths in `.fulcrum/settings.json` resolve relative to `.fulcrum`. Absolute paths and `~` are supported.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -248,20 +234,9 @@ Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Pa
 | `prompts` | string[] | `[]` | Local prompt template paths or directories |
 | `themes` | string[] | `[]` | Local theme file paths or directories |
 | `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands |
-| `enableBuiltinSkills` | boolean | `true` | Load built-in skills shipped with prime-agent |
-| `bundledSkills.websearch` | boolean | `true` | Load the built-in `websearch` skill |
+| `enableBuiltinSkills` | boolean | `true` | Load built-in skills shipped with fulcrum |
 
 Arrays support glob patterns and exclusions. Use `!pattern` to exclude. Use `+path` to force-include an exact path and `-path` to force-exclude an exact path.
-
-Disable the built-in `websearch` skill while keeping normal skill discovery enabled:
-
-```json
-{
-  "bundledSkills": {
-    "websearch": false
-  }
-}
-```
 
 #### packages
 
@@ -316,16 +291,16 @@ See [packages.md](packages.md) for package management details.
 
 ## Project Overrides
 
-Project settings (`.prime/agent/settings.json`) override global settings. Nested objects are merged:
+Project settings (`.fulcrum/settings.json`) override global settings. Nested objects are merged:
 
 ```json
-// ~/.prime/agent/settings.json (global)
+// ~/.fulcrum/settings.json (global)
 {
   "theme": "dark",
   "compaction": { "enabled": true, "reserveTokens": 16384 }
 }
 
-// .prime/agent/settings.json (project)
+// .fulcrum/settings.json (project)
 {
   "compaction": { "reserveTokens": 8192 }
 }

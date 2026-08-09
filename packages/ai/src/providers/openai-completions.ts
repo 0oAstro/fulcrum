@@ -11,7 +11,7 @@ import type {
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
 import { getAnthropicCacheWriteCost, hasStandardAnthropicCachePricing } from "../cache-pricing.js";
-import { getEnvApiKey, getPrimeTeamId } from "../env-api-keys.js";
+import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
 	AssistantMessage,
@@ -466,11 +466,6 @@ function createClient(
 			hasImages,
 		});
 		Object.assign(headers, copilotHeaders);
-	}
-
-	if (model.provider === "prime-inference") {
-		const teamId = getPrimeTeamId();
-		if (teamId) headers["X-Prime-Team-ID"] = teamId;
 	}
 
 	if (sessionId && compat.sendSessionAffinityHeaders) {
@@ -1078,8 +1073,6 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const isMoonshot = provider === "moonshotai" || provider === "moonshotai-cn" || baseUrl.includes("api.moonshot.");
 	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
 	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
-	const isPrimeInference = provider === "prime-inference" || baseUrl.includes("api.pinference.ai");
-
 	const isNonStandard =
 		provider === "cerebras" ||
 		baseUrl.includes("cerebras.ai") ||
@@ -1092,16 +1085,14 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		provider === "opencode" ||
 		baseUrl.includes("opencode.ai") ||
 		isCloudflareWorkersAI ||
-		isCloudflareAiGateway ||
-		isPrimeInference;
+		isCloudflareAiGateway;
 
-	const useMaxTokens = baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isPrimeInference;
+	const useMaxTokens = baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway;
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
 	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
 	const isAnthropicModel = model.id.startsWith("anthropic/");
-	const cacheControlFormat =
-		isAnthropicModel && (provider === "openrouter" || isPrimeInference) ? "anthropic" : undefined;
+	const cacheControlFormat = isAnthropicModel && provider === "openrouter" ? "anthropic" : undefined;
 
 	return {
 		supportsStore: !isNonStandard,
@@ -1123,7 +1114,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		openRouterRouting: {},
 		vercelGatewayRouting: {},
 		zaiToolStream: false,
-		supportsStrictMode: !isMoonshot && !isCloudflareAiGateway && !isPrimeInference,
+		supportsStrictMode: !isMoonshot && !isCloudflareAiGateway,
 		cacheControlFormat,
 		sendSessionAffinityHeaders: false,
 		supportsLongCacheRetention: !(isCloudflareWorkersAI || isCloudflareAiGateway),

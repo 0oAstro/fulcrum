@@ -1,9 +1,12 @@
+import { UPDATE_REPOSITORY } from "../config.js";
 import { getPiUserAgent } from "./pi-user-agent.js";
 
-const DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
+const DEFAULT_FULCRUM_DOWNLOAD_BASE_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
+const GITHUB_API_BASE_URL = "https://api.github.com";
 const STABLE_VERSION_MANIFEST_PATH = "latest.json";
 const BETA_VERSION_MANIFEST_PATH = "beta.json";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
+const FULCRUM_PACKAGE_NAME = "fulcrum";
 
 export interface LatestPiRelease {
 	version: string;
@@ -85,11 +88,15 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 	return candidateVersion.trim() !== currentVersion.trim();
 }
 
-function getPrimeAgentDownloadBaseUrl(): string {
-	return (process.env.PRIME_AGENT_DOWNLOAD_BASE_URL?.trim() || DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL).replace(
-		/\/+$/,
-		"",
-	);
+function getExplicitFulcrumDownloadBaseUrl(): string | undefined {
+	const value = process.env.FULCRUM_DOWNLOAD_BASE_URL?.trim();
+	return value ? value.replace(/\/+$/, "") : undefined;
+}
+
+function getUpdateRepository(): string | undefined {
+	const value = (process.env.FULCRUM_UPDATE_REPOSITORY?.trim() || UPDATE_REPOSITORY)?.trim();
+	if (!value || !/^[^/\s]+\/[^/\s]+$/.test(value)) return undefined;
+	return value;
 }
 
 function normalizeReleaseVersion(version: string): string {
@@ -111,13 +118,100 @@ function resolveReleaseUrl(baseUrl: string, pathOrUrl: string): string | undefin
 	}
 }
 
+interface GitHubReleaseAsset {
+	name?: unknown;
+	browser_download_url?: unknown;
+}
+
+interface GitHubReleaseResponse {
+	tag_name?: unknown;
+	assets?: unknown;
+	// These fields make the parser tolerant of manifest-shaped test doubles and
+	// older private release endpoints.
+	version?: unknown;
+	package?: unknown;
+	packageName?: unknown;
+	tarball?: unknown;
+}
+
+function isGitHubReleaseAsset(value: unknown): value is GitHubReleaseAsset {
+	return typeof value === "object" && value !== null;
+}
+
+async function getLatestGitHubRelease(
+	currentVersion: string,
+	repository: string,
+	options: { timeoutMs?: number } = {},
+): Promise<LatestPiRelease | undefined> {
+	const prerelease = parsePackageVersion(currentVersion)?.prerelease;
+	const endpoint = prerelease?.match(/^beta(?:\.|$)/)
+		? `${GITHUB_API_BASE_URL}/repos/${repository}/releases/tags/beta`
+		: `${GITHUB_API_BASE_URL}/repos/${repository}/releases/latest`;
+	const response = await fetch(endpoint, {
+		headers: {
+			"User-Agent": getPiUserAgent(currentVersion),
+			accept: "application/vnd.github+json",
+		},
+		signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_VERSION_CHECK_TIMEOUT_MS),
+	});
+	if (!response.ok) return undefined;
+
+	const data = (await response.json()) as GitHubReleaseResponse;
+	// Preserve compatibility with simple manifest responses used by older
+	// mirrors and callers that provide a lightweight update endpoint.
+	if (typeof data.version === "string" && !Array.isArray(data.assets)) {
+		const release: LatestPiRelease = { version: normalizeReleaseVersion(data.version) };
+		const packageName =
+			typeof data.package === "string" && data.package.trim()
+				? data.package.trim()
+				: typeof data.packageName === "string" && data.packageName.trim()
+					? data.packageName.trim()
+					: undefined;
+		const installSpec =
+			typeof data.tarball === "string" ? resolveReleaseUrl(GITHUB_API_BASE_URL, data.tarball) : undefined;
+		if (packageName) release.packageName = packageName;
+		if (installSpec) release.installSpec = installSpec;
+		return release;
+	}
+
+	const assets = Array.isArray(data.assets) ? data.assets.filter(isGitHubReleaseAsset) : [];
+	const packageAsset = assets.find((asset) => {
+		return (
+			typeof asset.name === "string" &&
+			/^fulcrum-.+\.tgz$/.test(asset.name) &&
+			typeof asset.browser_download_url === "string"
+		);
+	});
+	if (
+		!packageAsset ||
+		typeof packageAsset.name !== "string" ||
+		typeof packageAsset.browser_download_url !== "string"
+	) {
+		return undefined;
+	}
+
+	const versionMatch = packageAsset.name.match(/^fulcrum-(.+)\.tgz$/);
+	if (!versionMatch) return undefined;
+	return {
+		version: normalizeReleaseVersion(versionMatch[1]),
+		packageName: FULCRUM_PACKAGE_NAME,
+		installSpec: packageAsset.browser_download_url,
+	};
+}
+
 export async function getLatestPiRelease(
 	currentVersion: string,
 	options: { timeoutMs?: number } = {},
 ): Promise<LatestPiRelease | undefined> {
-	if (process.env.PI_SKIP_VERSION_CHECK || process.env.PI_OFFLINE) return undefined;
+	if (process.env.FULCRUM_SKIP_VERSION_CHECK || process.env.FULCRUM_OFFLINE) return undefined;
 
-	const baseUrl = getPrimeAgentDownloadBaseUrl();
+	const explicitBaseUrl = getExplicitFulcrumDownloadBaseUrl();
+	const repository = getUpdateRepository();
+	if (!explicitBaseUrl && repository) {
+		return getLatestGitHubRelease(currentVersion, repository, options);
+	}
+
+	const baseUrl = explicitBaseUrl || DEFAULT_FULCRUM_DOWNLOAD_BASE_URL;
 	const response = await fetch(`${baseUrl}/${getReleaseManifestPath(currentVersion)}`, {
 		headers: {
 			"User-Agent": getPiUserAgent(currentVersion),

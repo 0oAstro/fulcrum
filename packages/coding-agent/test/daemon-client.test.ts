@@ -100,8 +100,8 @@ function emitHello(
 		"data",
 		`${JSON.stringify({
 			type: "daemon_hello",
-			socketPath: "/tmp/prime-agent.sock",
-			protocol: { name: "prime-agent.daemon", version },
+			socketPath: "/tmp/fulcrum.sock",
+			protocol: { name: "fulcrum.daemon", version },
 			schemaRevision,
 			appVersion: "9.9.9",
 			clientId: "client-1",
@@ -122,7 +122,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("allows connect retry after the socket emits an error before connecting", async () => {
-		const client = new DaemonClient("/tmp/prime-agent-missing.sock");
+		const client = new DaemonClient("/tmp/fulcrum-missing.sock");
 
 		const firstAttempt = captureRejection(client.connect());
 		expect(netMock.sockets).toHaveLength(1);
@@ -132,8 +132,8 @@ describe("DaemonClient", () => {
 		firstSocket.emit("error", new Error("initial connect failed"));
 
 		const firstError = await firstAttempt;
-		expect(firstError.message).toContain("Failed to connect to the Prime Agent daemon: initial connect failed.");
-		expect(firstError.message).toContain("Socket: /tmp/prime-agent-missing.sock.");
+		expect(firstError.message).toContain("Failed to connect to the Fulcrum daemon: initial connect failed.");
+		expect(firstError.message).toContain("Socket: /tmp/fulcrum-missing.sock.");
 		expect(firstError.message).toContain("Daemon log:");
 		expect(firstSocket.listenerCount("data")).toBe(0);
 		expect(firstSocket.listenerCount("end")).toBe(0);
@@ -143,20 +143,20 @@ describe("DaemonClient", () => {
 		netMock.sockets[1]!.emit("error", new Error("retry reached socket"));
 
 		await expect(secondAttempt).resolves.toMatchObject({
-			message: expect.stringContaining("Failed to connect to the Prime Agent daemon: retry reached socket."),
+			message: expect.stringContaining("Failed to connect to the Fulcrum daemon: retry reached socket."),
 		});
 	});
 
 	it("allows connect retry after the initial connection times out", async () => {
 		vi.useFakeTimers();
-		const client = new DaemonClient("/tmp/prime-agent-slow.sock");
+		const client = new DaemonClient("/tmp/fulcrum-slow.sock");
 
 		const firstAttempt = captureRejection(client.connect(5));
 		expect(netMock.sockets).toHaveLength(1);
 		const firstSocket = netMock.sockets[0]!;
 
 		const timeoutRejection = expect(firstAttempt).resolves.toMatchObject({
-			message: expect.stringContaining("Timed out after 5ms connecting to the Prime Agent daemon."),
+			message: expect.stringContaining("Timed out after 5ms connecting to the Fulcrum daemon."),
 		});
 		await vi.advanceTimersByTimeAsync(5);
 		await timeoutRejection;
@@ -170,12 +170,12 @@ describe("DaemonClient", () => {
 		netMock.sockets[1]!.emit("error", new Error("retry reached socket"));
 
 		await expect(secondAttempt).resolves.toMatchObject({
-			message: expect.stringContaining("Failed to connect to the Prime Agent daemon: retry reached socket."),
+			message: expect.stringContaining("Failed to connect to the Fulcrum daemon: retry reached socket."),
 		});
 	});
 
 	it("captures the daemon hello greeting for version checks", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
@@ -186,8 +186,8 @@ describe("DaemonClient", () => {
 		const waited = client.waitForHello();
 		const hello = {
 			type: "daemon_hello",
-			socketPath: "/tmp/prime-agent.sock",
-			protocol: { name: "prime-agent.daemon", version: 1 },
+			socketPath: "/tmp/fulcrum.sock",
+			protocol: { name: "fulcrum.daemon", version: 1 },
 			appVersion: "9.9.9",
 			clientId: "client-1",
 			serverCapabilities: [],
@@ -202,7 +202,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("rejects unsupported optional commands without writing them to an older daemon", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -216,7 +216,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("does not send subagent deletion to an old daemon without the capability", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -231,7 +231,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("sends subagent deletion to a capable daemon without requiring a schema bump", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -249,7 +249,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("rejects an old daemon before requesting session state", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -264,7 +264,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("rejects session input admission clearly when an old daemon lacks the capability", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -279,7 +279,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("field-gates prompt admissionId before writing raw commands", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -294,7 +294,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("accepts a newer compatible daemon schema for admission-gated prompts", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -319,7 +319,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("isolates a message consumer failure from the rest of the client", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -337,7 +337,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("serializes activeSessionId for session commands", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 
 		const connect = client.connect();
 		expect(netMock.sockets).toHaveLength(1);
@@ -359,7 +359,7 @@ describe("DaemonClient", () => {
 		expect(envelope).toMatchObject({
 			type: "command",
 			clientId: expect.any(String),
-			protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+			protocol: { name: "fulcrum.daemon", version: DAEMON_PROTOCOL_VERSION },
 			command: { type: "attach", activeSessionId: "active-1" },
 		});
 		expect(envelope.command).not.toHaveProperty("daemonSessionId");
@@ -374,7 +374,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("serializes list commands with all sessions requested", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 
 		const connect = client.connect();
 		expect(netMock.sockets).toHaveLength(1);
@@ -400,17 +400,17 @@ describe("DaemonClient", () => {
 	});
 
 	it("includes command, socket, and log context when a request is made while disconnected", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 
 		const request = client.request({ type: "list", all: true });
 
 		await expect(request).rejects.toMatchObject({
 			message: expect.stringContaining(
-				'Cannot send daemon command "list" because the Prime Agent daemon is not connected.',
+				'Cannot send daemon command "list" because the Fulcrum daemon is not connected.',
 			),
 		});
 		await expect(request).rejects.toMatchObject({
-			message: expect.stringContaining("Socket: /tmp/prime-agent.sock."),
+			message: expect.stringContaining("Socket: /tmp/fulcrum.sock."),
 		});
 		await expect(request).rejects.toMatchObject({
 			message: expect.stringContaining("Daemon log:"),
@@ -418,7 +418,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("keeps durable command envelopes on the session-action protocol", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -450,7 +450,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("routes request progress by response id without notifying general listeners", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 
 		const connect = client.connect();
 		expect(netMock.sockets).toHaveLength(1);
@@ -548,7 +548,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("serializes per-session config for create commands", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 
 		const connect = client.connect();
 		expect(netMock.sockets).toHaveLength(1);
@@ -608,7 +608,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("acknowledges durable mutating-command results on the current protocol", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -632,7 +632,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("notifies listeners when a connected daemon socket closes", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		expect(client.isConnected).toBe(false);
 
 		const connect = client.connect();
@@ -648,8 +648,8 @@ describe("DaemonClient", () => {
 		socket.emit("close");
 
 		expect(closed).toHaveLength(1);
-		expect(closed[0]?.message).toContain("Connection to the Prime Agent daemon closed.");
-		expect(closed[0]?.message).toContain("Socket: /tmp/prime-agent.sock.");
+		expect(closed[0]?.message).toContain("Connection to the Fulcrum daemon closed.");
+		expect(closed[0]?.message).toContain("Socket: /tmp/fulcrum.sock.");
 		expect(closed[0]?.message).toContain("Daemon log:");
 		expect(client.isConnected).toBe(false);
 		unsubscribe();
@@ -657,7 +657,7 @@ describe("DaemonClient", () => {
 	});
 
 	it.each(["shutdown", "update"] as const)("preserves the daemon %s reason on socket close", async (reason) => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -675,7 +675,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("notifies every listener before disconnecting a shared client for update reconnect", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
@@ -696,7 +696,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("notifies listeners once when a socket error is followed by close", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 
 		const connect = client.connect();
 		expect(netMock.sockets).toHaveLength(1);
@@ -715,7 +715,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("allows connect retry after a connected daemon socket closes", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 
 		const firstConnect = client.connect();
 		expect(netMock.sockets).toHaveLength(1);
@@ -737,7 +737,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("shares one reconnect attempt across concurrent callers", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const firstConnect = client.connect();
 		const firstSocket = netMock.sockets[0]!;
 		firstSocket.emit("connect");
@@ -755,7 +755,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("resends the same command envelope after a recoverable disconnect", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		client.enableRequestRecovery();
 		const firstConnect = client.connect();
 		const firstSocket = netMock.sockets[0]!;
@@ -777,8 +777,8 @@ describe("DaemonClient", () => {
 			"data",
 			`${JSON.stringify({
 				type: "daemon_hello",
-				socketPath: "/tmp/prime-agent.sock",
-				protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+				socketPath: "/tmp/fulcrum.sock",
+				protocol: { name: "fulcrum.daemon", version: DAEMON_PROTOCOL_VERSION },
 				clientId: "server-client-2",
 				serverCapabilities: ["session_input_admission"],
 			})}\n`,
@@ -795,7 +795,7 @@ describe("DaemonClient", () => {
 
 	it("pauses request timeouts while a recoverable connection is disconnected", async () => {
 		vi.useFakeTimers();
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		client.enableRequestRecovery();
 		const firstConnect = client.connect();
 		const firstSocket = netMock.sockets[0]!;
@@ -834,7 +834,7 @@ describe("DaemonClient", () => {
 
 	it("rejects a pending admission-gated prompt when the reconnected daemon is downgraded", async () => {
 		vi.useFakeTimers();
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		client.enableRequestRecovery();
 		const firstConnect = client.connect();
 		const firstSocket = netMock.sockets[0]!;
@@ -870,7 +870,7 @@ describe("DaemonClient", () => {
 	});
 
 	it("reconnects raw clients and replays pending commands after supervisor replacement", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const client = new DaemonClient("/tmp/fulcrum.sock");
 		const firstConnect = client.connect();
 		const firstSocket = netMock.sockets[0]!;
 		firstSocket.emit("connect");
@@ -896,8 +896,8 @@ describe("DaemonClient", () => {
 			"data",
 			`${JSON.stringify({
 				type: "daemon_hello",
-				socketPath: "/tmp/prime-agent.sock",
-				protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+				socketPath: "/tmp/fulcrum.sock",
+				protocol: { name: "fulcrum.daemon", version: DAEMON_PROTOCOL_VERSION },
 				clientId: "server-client-2",
 				serverCapabilities: [],
 			})}\n`,

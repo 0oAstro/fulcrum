@@ -56,7 +56,7 @@ afterEach(() => {
 });
 
 function makeTempDir(): string {
-	tempDir = mkdtempSync(join(tmpdir(), "prime-agent-refinement-test-"));
+	tempDir = mkdtempSync(join(tmpdir(), "fulcrum-refinement-test-"));
 	return tempDir;
 }
 
@@ -82,8 +82,8 @@ function createRefineModel(reasoning: boolean): Model<"openai-completions"> {
 		id: "openai/gpt-5.5",
 		name: "GPT 5.5",
 		api: "openai-completions",
-		provider: "prime-inference",
-		baseUrl: "https://inference.primeintellect.ai/v1",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
 		reasoning,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -97,7 +97,7 @@ function assistantText(text: string): AssistantMessage {
 		role: "assistant",
 		content: [{ type: "text", text }],
 		api: "openai-completions",
-		provider: "prime-inference",
+		provider: "openai",
 		model: "openai/gpt-5.5",
 		usage: {
 			input: 1,
@@ -710,7 +710,7 @@ describe("harness refinement", () => {
 			},
 			{
 				type: "custom",
-				customType: "prime-agent.refinement",
+				customType: "fulcrum.refinement",
 				data: result,
 				id: "custom_2",
 				parentId: "custom_1",
@@ -718,7 +718,7 @@ describe("harness refinement", () => {
 			},
 			{
 				type: "custom",
-				customType: "prime-agent.refinement",
+				customType: "fulcrum.refinement",
 				data: { id: "malformed" },
 				id: "custom_malformed",
 				parentId: "custom_2",

@@ -7,6 +7,8 @@ export type DeleteSessionFileResult = { ok: true; method: "trash" | "unlink" } |
 
 export interface DeleteSessionFileOptions {
 	afterFileRemoved?: () => void;
+	/** Header-derived session ID when the JSONL filename has been renamed or imported. */
+	artifactSessionId?: string;
 }
 
 /**
@@ -15,9 +17,18 @@ export interface DeleteSessionFileOptions {
  * `<dirname(sessionDir)>/session-artifacts/<id>`.
  * Only invoked on delete, never on deactivation.
  */
-async function deleteSessionArtifacts(sessionPath: string): Promise<void> {
-	const sessionId = basename(sessionPath).replace(/\.jsonl$/, "");
-	if (!sessionId) return;
+async function deleteSessionArtifacts(sessionPath: string, artifactSessionId?: string): Promise<void> {
+	const sessionId = artifactSessionId ?? basename(sessionPath).replace(/\.jsonl$/, "");
+	if (
+		!sessionId ||
+		sessionId === "." ||
+		sessionId === ".." ||
+		sessionId.includes("/") ||
+		sessionId.includes("\\") ||
+		basename(sessionId) !== sessionId
+	) {
+		return;
+	}
 	const artifactDir = join(dirname(dirname(sessionPath)), "session-artifacts", sessionId);
 	await rm(artifactDir, { recursive: true, force: true });
 }
@@ -68,7 +79,7 @@ export async function deleteSessionFile(
 	const result = await removeSessionFile(sessionPath);
 	if (result.ok) {
 		options.afterFileRemoved?.();
-		await deleteSessionArtifacts(sessionPath);
+		await deleteSessionArtifacts(sessionPath, options.artifactSessionId);
 	}
 	return result;
 }

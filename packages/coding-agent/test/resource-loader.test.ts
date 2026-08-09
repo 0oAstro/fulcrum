@@ -15,24 +15,16 @@ describe("DefaultResourceLoader", () => {
 	let tempDir: string;
 	let agentDir: string;
 	let cwd: string;
-	let previousSerperApiKey: string | undefined;
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `rl-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		agentDir = join(tempDir, "agent");
 		cwd = join(tempDir, "project");
-		previousSerperApiKey = process.env.SERPER_API_KEY;
-		delete process.env.SERPER_API_KEY;
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(cwd, { recursive: true });
 	});
 
 	afterEach(() => {
-		if (previousSerperApiKey === undefined) {
-			delete process.env.SERPER_API_KEY;
-		} else {
-			process.env.SERPER_API_KEY = previousSerperApiKey;
-		}
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -106,7 +98,7 @@ Prompt content.`,
 
 		it("should prefer project resources over user on name collisions", async () => {
 			const userPromptsDir = join(agentDir, "prompts");
-			const projectPromptsDir = join(cwd, ".prime", "agent", "prompts");
+			const projectPromptsDir = join(cwd, ".fulcrum", "prompts");
 			mkdirSync(userPromptsDir, { recursive: true });
 			mkdirSync(projectPromptsDir, { recursive: true });
 			const userPromptPath = join(userPromptsDir, "commit.md");
@@ -115,7 +107,7 @@ Prompt content.`,
 			writeFileSync(projectPromptPath, "Project prompt");
 
 			const userSkillDir = join(agentDir, "skills", "collision-skill");
-			const projectSkillDir = join(cwd, ".prime", "agent", "skills", "collision-skill");
+			const projectSkillDir = join(cwd, ".fulcrum", "skills", "collision-skill");
 			mkdirSync(userSkillDir, { recursive: true });
 			mkdirSync(projectSkillDir, { recursive: true });
 			const userSkillPath = join(userSkillDir, "SKILL.md");
@@ -142,9 +134,9 @@ Project skill`,
 			) as { name: string; vars?: Record<string, string> };
 			baseTheme.name = "collision-theme";
 			const userThemePath = join(agentDir, "themes", "collision.json");
-			const projectThemePath = join(cwd, ".prime", "agent", "themes", "collision.json");
+			const projectThemePath = join(cwd, ".fulcrum", "themes", "collision.json");
 			mkdirSync(join(agentDir, "themes"), { recursive: true });
-			mkdirSync(join(cwd, ".prime", "agent", "themes"), { recursive: true });
+			mkdirSync(join(cwd, ".fulcrum", "themes"), { recursive: true });
 			writeFileSync(userThemePath, JSON.stringify(baseTheme, null, 2));
 			if (baseTheme.vars) {
 				baseTheme.vars.accent = "#ff00ff";
@@ -178,9 +170,9 @@ Project skill`,
 			);
 
 			mkdirSync(agentDir, { recursive: true });
-			mkdirSync(join(cwd, ".prime", "agent"), { recursive: true });
+			mkdirSync(join(cwd, ".fulcrum"), { recursive: true });
 			symlinkSync(sharedExtDir, join(agentDir, "extensions"), "dir");
-			symlinkSync(sharedExtDir, join(cwd, ".prime", "agent", "extensions"), "dir");
+			symlinkSync(sharedExtDir, join(cwd, ".fulcrum", "extensions"), "dir");
 
 			const loader = new DefaultResourceLoader({ cwd, agentDir });
 			await loader.reload();
@@ -191,12 +183,12 @@ Project skill`,
 
 			// mergePaths processes project paths before user paths, so the project
 			// alias is the canonical survivor.
-			expect(extensionsResult.extensions[0].path).toBe(join(cwd, ".prime", "agent", "extensions", "shared.ts"));
+			expect(extensionsResult.extensions[0].path).toBe(join(cwd, ".fulcrum", "extensions", "shared.ts"));
 		});
 
 		it("should keep both extensions loaded when command names collide", async () => {
 			const userExtDir = join(agentDir, "extensions");
-			const projectExtDir = join(cwd, ".prime", "agent", "extensions");
+			const projectExtDir = join(cwd, ".fulcrum", "extensions");
 			mkdirSync(userExtDir, { recursive: true });
 			mkdirSync(projectExtDir, { recursive: true });
 
@@ -326,7 +318,7 @@ Content`,
 		});
 
 		it("should discover SYSTEM.md from cwd/.pi", async () => {
-			const piDir = join(cwd, ".prime", "agent");
+			const piDir = join(cwd, ".fulcrum");
 			mkdirSync(piDir, { recursive: true });
 			writeFileSync(join(piDir, "SYSTEM.md"), "You are a helpful assistant.");
 
@@ -337,7 +329,7 @@ Content`,
 		});
 
 		it("should discover APPEND_SYSTEM.md", async () => {
-			const piDir = join(cwd, ".prime", "agent");
+			const piDir = join(cwd, ".fulcrum");
 			mkdirSync(piDir, { recursive: true });
 			writeFileSync(join(piDir, "APPEND_SYSTEM.md"), "Additional instructions.");
 
@@ -461,101 +453,12 @@ Content`,
 	});
 
 	describe("bundled skills", () => {
-		it("should load the bundled websearch skill by default", async () => {
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const { skills } = loader.getSkills();
-			const websearch = skills.find((s) => s.name === "websearch");
-			expect(websearch).toBeDefined();
-			expect(websearch?.description).toContain("/login");
-			expect(websearch?.description).toContain("MCP Connections");
-			expect(websearch?.description).toContain("Serper (web search)");
-			expect(websearch?.kind).toBe("python");
-			if (websearch?.kind === "python") {
-				expect(websearch.python.importName).toBe("websearch");
-				expect(websearch.python.pyprojectPath.endsWith("pyproject.toml")).toBe(true);
-			}
-		});
-
-		it("should not emit a SERPER_API_KEY warning when the key is unset", async () => {
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const { diagnostics } = loader.getSkills();
-			expect(diagnostics.some((d) => d.type === "warning" && d.message.includes("SERPER_API_KEY"))).toBe(false);
-		});
-
-		it("should not load the bundled websearch skill when disabled in settings", async () => {
-			const settingsManager = SettingsManager.inMemory({ bundledSkills: { websearch: false } });
-			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
-			await loader.reload();
-
-			const { skills, diagnostics } = loader.getSkills();
-			expect(skills.some((s) => s.name === "websearch")).toBe(false);
-			expect(diagnostics.some((d) => d.type === "warning" && d.message.includes("SERPER_API_KEY is not set"))).toBe(
-				false,
-			);
-		});
-
 		it("should not load bundled skills when noSkills is true", async () => {
 			const loader = new DefaultResourceLoader({ cwd, agentDir, noSkills: true });
 			await loader.reload();
 
 			const { skills } = loader.getSkills();
-			expect(skills.some((s) => s.name === "websearch")).toBe(false);
-		});
-
-		it("should let a project skill override the bundled websearch skill", async () => {
-			const projectSkillDir = join(cwd, ".prime", "agent", "skills", "websearch");
-			mkdirSync(projectSkillDir, { recursive: true });
-			writeFileSync(
-				join(projectSkillDir, "SKILL.md"),
-				`---
-name: websearch
-description: Project-specific web search override.
----
-Project override.`,
-			);
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const { skills, diagnostics } = loader.getSkills();
-			const websearch = skills.find((s) => s.name === "websearch");
-			expect(websearch).toBeDefined();
-			expect(websearch?.filePath).toBe(join(projectSkillDir, "SKILL.md"));
-			expect(websearch?.kind).toBe("markdown");
-			expect(diagnostics.some((d) => d.type === "collision" && d.collision?.name === "websearch")).toBe(true);
-			expect(diagnostics.some((d) => d.type === "warning" && d.message.includes("SERPER_API_KEY is not set"))).toBe(
-				false,
-			);
-		});
-
-		it("should let an explicit --skill path override the bundled websearch skill", async () => {
-			const customSkillDir = join(tempDir, "custom-websearch", "websearch");
-			mkdirSync(customSkillDir, { recursive: true });
-			writeFileSync(
-				join(customSkillDir, "SKILL.md"),
-				`---
-name: websearch
-description: Explicit web search override.
----
-Explicit override.`,
-			);
-
-			const loader = new DefaultResourceLoader({
-				cwd,
-				agentDir,
-				additionalSkillPaths: [customSkillDir],
-			});
-			await loader.reload();
-
-			const { skills } = loader.getSkills();
-			const websearch = skills.find((s) => s.name === "websearch");
-			expect(websearch).toBeDefined();
-			expect(websearch?.filePath).toBe(join(customSkillDir, "SKILL.md"));
-			expect(websearch?.kind).toBe("markdown");
+			expect(skills.some((s) => s.name === "skill-creator")).toBe(false);
 		});
 	});
 

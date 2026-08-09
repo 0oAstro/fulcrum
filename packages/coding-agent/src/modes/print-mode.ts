@@ -2,8 +2,8 @@
  * Print mode (single-shot): Send prompts, output result, exit.
  *
  * Used for:
- * - `pi -p "prompt"` - text output
- * - `pi --mode json "prompt"` - JSON event stream
+ * - `fulcrum -p "prompt"` - text output
+ * - `fulcrum --mode json "prompt"` - JSON event stream
  */
 
 import type { ImageContent } from "@earendil-works/pi-ai";

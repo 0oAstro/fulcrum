@@ -197,6 +197,8 @@ describe("InteractiveMode startup hints", () => {
 
 		expect(guide).toContain("`!` shell mode · `/` commands · `@` file paths");
 		expect(guide).toContain("stash prompt");
+		expect(guide).toContain("cycle models");
+		expect(guide).toContain("cycle reasoning");
 		expect(guide).toContain("`/hotkeys` full reference");
 		expect(guide).not.toContain("Ctrl+Z");
 		expect(guide).not.toContain("suspend");
@@ -232,6 +234,8 @@ describe("InteractiveMode startup hints", () => {
 		expect(guide).toContain("**Editing**");
 		expect(guide).toContain("**Fullscreen mode (`/fullscreen`)**");
 		expect(guide).toContain("Queue follow-up message");
+		expect(guide).toContain("Cycle models");
+		expect(guide).toContain("Cycle thinking level");
 		expect(guide).not.toContain("Ctrl+Z");
 		expect(guide).not.toContain("Suspend to background");
 	});

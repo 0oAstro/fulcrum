@@ -5,6 +5,7 @@ import {
 	agentStatusChanged,
 	buildStatusContext,
 	parseAgentStatusResponse,
+	resolveSummaryModel,
 } from "../src/modes/daemon/daemon-session-summarizer.js";
 
 function userMessage(text: string): AgentMessage {
@@ -17,6 +18,15 @@ function assistantMessage(text: string, tools: string[] = []): AgentMessage {
 }
 
 describe("daemon session summarizer", () => {
+	test("selects the cheapest configured text model", () => {
+		const imageOnly = { provider: "a", id: "image", input: ["image"], cost: { input: 0, output: 0 } };
+		const expensive = { provider: "b", id: "expensive", input: ["text"], cost: { input: 1, output: 5 } };
+		const cheap = { provider: "c", id: "cheap", input: ["text"], cost: { input: 1, output: 1 } };
+		const registry = { getAvailable: () => [expensive, imageOnly, cheap] };
+
+		expect(resolveSummaryModel(registry as never)).toBe(cheap);
+	});
+
 	describe("parseAgentStatusResponse", () => {
 		test("parses recap and completion verdict for an idle session", () => {
 			const result = parseAgentStatusResponse(

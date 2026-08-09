@@ -1,8 +1,8 @@
-"""Prime Agent refine skill: continual harness refinement from the kernel.
+"""Fulcrum refine skill: continual harness refinement from the kernel.
 
 Refinement runs host-side (the same implementation as /refine); these
 functions are thin typed wrappers over the generic host bridge
-(`rlm.host_request`). They only work inside the Prime Agent IPython kernel.
+(`rlm.host_request`). They only work inside the Fulcrum IPython kernel.
 """
 
 from __future__ import annotations

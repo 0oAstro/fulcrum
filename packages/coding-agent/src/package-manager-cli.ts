@@ -77,7 +77,7 @@ const UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS = 60_000;
 type UpdateTarget = { type: "all" } | { type: "self" } | { type: "extensions"; source?: string };
 
 export function isSelfUpdateSource(source: string): boolean {
-	return source === "self" || source === "pi" || source === APP_NAME;
+	return source === "self" || source === APP_NAME;
 }
 
 interface PackageCommandOptions {
@@ -416,7 +416,7 @@ function printSelfUpdateUnavailable(
 	const entrypoint = process.argv[1];
 	if (entrypoint) {
 		console.error("");
-		console.error(`Location of pi executable: ${entrypoint}`);
+		console.error(`Location of ${APP_NAME} executable: ${entrypoint}`);
 	}
 }
 
@@ -439,19 +439,23 @@ function setSelfUpdateNoChangeExitCode(): void {
 async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 	try {
 		const latestRelease = await getLatestPiRelease(VERSION);
-		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
-		const installSpec = latestRelease?.installSpec ?? packageName;
-		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
-		if (
-			force ||
-			!latestRelease ||
-			packageRenameRequiresUpdate ||
-			isNewerPackageVersion(latestRelease.version, VERSION)
-		) {
-			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
+		if (!latestRelease) {
+			console.error(
+				chalk.yellow(
+					`Could not find a Fulcrum release to update from; leaving the current installation unchanged.`,
+				),
+			);
+			return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: false };
+		}
+		const packageName = latestRelease.packageName ?? PACKAGE_NAME;
+		const installSpec = latestRelease.installSpec ?? packageName;
+		const packageRenameRequiresUpdate = !latestRelease.installSpec && packageName !== PACKAGE_NAME;
+		if (force || packageRenameRequiresUpdate || isNewerPackageVersion(latestRelease.version, VERSION)) {
+			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease.version };
 		}
 	} catch {
-		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
+		console.error(chalk.yellow(`Could not check for a Fulcrum update; leaving the current installation unchanged.`));
+		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: false };
 	}
 
 	console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
@@ -484,15 +488,15 @@ async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
 }
 
 const UPDATE_RESTART_CONTINUATION_PROMPT =
-	"Prime Agent restarted after an update. Continue the interrupted task from the saved transcript and restored tool/kernel state. Inspect current state before retrying commands when needed.";
+	"Fulcrum restarted after an update. Continue the interrupted task from the saved transcript and restored tool/kernel state. Inspect current state before retrying commands when needed.";
 
 const UPDATE_SESSION_LOSS_COPY: DaemonSessionLossCopy = {
 	busyDetail(count) {
 		const { noun, pronoun } = pluralizeSessions(count);
-		return `Prime Agent has ${count} busy ${noun}. After the update installs, it will stop ${pronoun}, restart its background service, and resume interrupted work.`;
+		return `Fulcrum has ${count} busy ${noun}. After the update installs, it will stop ${pronoun}, restart its background service, and resume interrupted work.`;
 	},
 	unlistableDetail:
-		"Running agents could not be listed. After the update installs, Prime Agent will stop resident agents, restart its background service, and resume interrupted work where possible.",
+		"Running agents could not be listed. After the update installs, Fulcrum will stop resident agents, restart its background service, and resume interrupted work where possible.",
 	question: "Continue?",
 	nonTtyHint: "Re-run with --force to proceed.",
 };
@@ -1010,8 +1014,8 @@ async function restoreDaemonUpdateRestartSession(
 					type: "append_custom_message",
 					activeSessionId,
 					message: {
-						customType: "prime-agent.update_complete",
-						content: `Prime Agent updated to v${VERSION}. This daemon session was restored after the update.`,
+						customType: "fulcrum.update_complete",
+						content: `Fulcrum updated to v${VERSION}. This daemon session was restored after the update.`,
 						display: true,
 						details: { version: VERSION },
 					},

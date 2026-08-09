@@ -83,7 +83,7 @@ describe("issue #4491 provider stale after repeated 401", () => {
 
 	it("emits stale auth source tokens for daemon clients after bare 401 auth failures", async () => {
 		const harness = await createHarness({
-			provider: "prime-inference",
+			provider: "anthropic",
 			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
@@ -93,14 +93,14 @@ describe("issue #4491 provider stale after repeated 401", () => {
 
 		const authStaleEvents = harness.eventsOfType("auth_stale");
 		expect(authStaleEvents).toHaveLength(1);
-		expect(authStaleEvents[0]?.provider).toBe("prime-inference");
+		expect(authStaleEvents[0]?.provider).toBe("anthropic");
 		expect(authStaleEvents[0]?.sourceTokens).toMatchObject([
 			{
-				provider: "prime-inference",
+				provider: "anthropic",
 				source: "runtime",
 			},
 		]);
-		expect(harness.authStorage.getAuthStatus("prime-inference")).toEqual({
+		expect(harness.authStorage.getAuthStatus("anthropic")).toEqual({
 			configured: false,
 			source: "stale",
 			label: "expired",
@@ -109,7 +109,7 @@ describe("issue #4491 provider stale after repeated 401", () => {
 
 	it("classifies bare status-code auth failures before login guidance is appended", async () => {
 		const harness = await createHarness({
-			provider: "prime-inference",
+			provider: "anthropic",
 			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);

@@ -8,8 +8,8 @@ export {
 	acpToolKind,
 	acpUpdatesForSessionEvent,
 	bashToolCallId,
-	PRIME_AGENT_META_NAMESPACE,
-	primeAgentMeta,
+	FULCRUM_META_NAMESPACE,
+	fulcrumMeta,
 	runAcpMode,
 	runAcpModeWithConnection,
 } from "./acp/index.js";

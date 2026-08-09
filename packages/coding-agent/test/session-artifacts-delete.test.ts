@@ -8,7 +8,7 @@ let root = "";
 
 describe("deleteSessionFile removes the session artifact directory", () => {
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "prime-agent-session-delete-"));
+		root = mkdtempSync(join(tmpdir(), "fulcrum-session-delete-"));
 	});
 
 	afterEach(() => {
@@ -34,6 +34,23 @@ describe("deleteSessionFile removes the session artifact directory", () => {
 		expect(result.ok).toBe(true);
 		expect(existsSync(artifactDir)).toBe(false);
 		expect(existsSync(sessionPath)).toBe(false);
+	});
+
+	it("uses the header session ID for artifacts when an imported file has a different name", async () => {
+		const sessionId = "header-session-id";
+		const sessionsDir = join(root, "sessions");
+		mkdirSync(sessionsDir, { recursive: true });
+		const sessionPath = join(sessionsDir, "imported-session.jsonl");
+		writeFileSync(sessionPath, '{"type":"session","id":"header-session-id"}\n');
+		const artifactDir = join(root, "session-artifacts", sessionId);
+		mkdirSync(artifactDir, { recursive: true });
+		writeFileSync(join(artifactDir, "kernel-state.dill"), "payload");
+
+		const result = await deleteSessionFile(sessionPath, { artifactSessionId: sessionId });
+
+		expect(result.ok).toBe(true);
+		expect(existsSync(sessionPath)).toBe(false);
+		expect(existsSync(artifactDir)).toBe(false);
 	});
 
 	it("runs the file-removed callback before deleting artifacts", async () => {

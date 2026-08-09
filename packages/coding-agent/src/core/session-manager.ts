@@ -53,6 +53,195 @@ const CONTENT_ENTRY_TYPES = new Set([
 	"branch_summary",
 ]);
 
+const DRAFT_BOOKKEEPING_ENTRY_TYPES = new Set(["session_state", "agent_status", "git_state"]);
+const DRAFT_BOOTSTRAP_ENTRY_TYPES = ["model_change", "thinking_level_change", "service_tier_change"] as const;
+const SERVICE_TIERS = new Set<unknown>(["auto", "default", "flex", "scale", "priority", null]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+	return Object.keys(value).every((key) => keys.includes(key));
+}
+
+function isNonEmptyString(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0;
+}
+
+function isSafeSessionId(value: unknown): value is string {
+	return (
+		isNonEmptyString(value) &&
+		value !== "." &&
+		value !== ".." &&
+		!value.includes("/") &&
+		!value.includes("\\") &&
+		basename(value) === value
+	);
+}
+
+function isTimestamp(value: unknown): value is string {
+	return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+function isGitContext(value: unknown): boolean {
+	if (!isRecord(value) || !hasOnlyKeys(value, ["repoUrl", "commit", "branch"])) return false;
+	return (
+		(value.repoUrl === undefined || typeof value.repoUrl === "string") &&
+		(value.commit === undefined || typeof value.commit === "string") &&
+		(value.branch === undefined || typeof value.branch === "string")
+	);
+}
+
+function isSessionDraftHeader(value: unknown): value is Record<string, unknown> {
+	if (
+		!isRecord(value) ||
+		!hasOnlyKeys(value, ["type", "version", "id", "timestamp", "cwd", "parentSession", "rlmDepth", "git"]) ||
+		value.type !== "session" ||
+		value.version !== CURRENT_SESSION_VERSION ||
+		!isSafeSessionId(value.id) ||
+		!isTimestamp(value.timestamp) ||
+		!isNonEmptyString(value.cwd)
+	) {
+		return false;
+	}
+	return (
+		(value.parentSession === undefined || typeof value.parentSession === "string") &&
+		(value.rlmDepth === undefined ||
+			(typeof value.rlmDepth === "number" && Number.isInteger(value.rlmDepth) && value.rlmDepth >= 0)) &&
+		(value.git === undefined || isGitContext(value.git))
+	);
+}
+
+interface SessionDraftEntry {
+	type: string;
+	id: string;
+	timestamp: string;
+	parentId: string | null;
+}
+
+function isSessionDraftEntry(value: unknown): value is SessionDraftEntry {
+	return (
+		isRecord(value) &&
+		typeof value.type === "string" &&
+		isNonEmptyString(value.id) &&
+		isTimestamp(value.timestamp) &&
+		(value.parentId === null || typeof value.parentId === "string")
+	);
+}
+
+function isValidDraftBootstrapEntry(entry: SessionDraftEntry & Record<string, unknown>): boolean {
+	switch (entry.type) {
+		case "model_change":
+			return (
+				hasOnlyKeys(entry, ["type", "id", "parentId", "timestamp", "provider", "modelId"]) &&
+				isNonEmptyString(entry.provider) &&
+				isNonEmptyString(entry.modelId)
+			);
+		case "thinking_level_change":
+			return (
+				hasOnlyKeys(entry, ["type", "id", "parentId", "timestamp", "thinkingLevel"]) &&
+				isNonEmptyString(entry.thinkingLevel)
+			);
+		case "service_tier_change":
+			return (
+				hasOnlyKeys(entry, ["type", "id", "parentId", "timestamp", "serviceTier"]) &&
+				SERVICE_TIERS.has(entry.serviceTier)
+			);
+		default:
+			return false;
+	}
+}
+
+function isValidDraftBookkeepingEntry(entry: SessionDraftEntry & Record<string, unknown>): boolean {
+	switch (entry.type) {
+		case "session_state": {
+			const state = entry.state;
+			return (
+				hasOnlyKeys(entry, ["type", "id", "parentId", "timestamp", "state"]) &&
+				isRecord(state) &&
+				hasOnlyKeys(state, ["status"]) &&
+				(state.status === "active" || state.status === "archived" || state.status === "crash")
+			);
+		}
+		case "agent_status": {
+			const status = entry.status;
+			return (
+				hasOnlyKeys(entry, ["type", "id", "parentId", "timestamp", "status"]) &&
+				isRecord(status) &&
+				hasOnlyKeys(status, ["summary", "taskState", "basedOnMessageCount"]) &&
+				typeof status.summary === "string" &&
+				(status.taskState === undefined ||
+					status.taskState === "needs_input" ||
+					status.taskState === "completed") &&
+				typeof status.basedOnMessageCount === "number" &&
+				Number.isInteger(status.basedOnMessageCount) &&
+				status.basedOnMessageCount >= 0
+			);
+		}
+		case "git_state":
+			return hasOnlyKeys(entry, ["type", "id", "parentId", "timestamp", "git"]) && isGitContext(entry.git);
+		default:
+			return false;
+	}
+}
+
+function hasUserContentEntryTypes(entryTypes: readonly string[]): boolean {
+	let start = 0;
+	for (const bootstrapType of DRAFT_BOOTSTRAP_ENTRY_TYPES) {
+		if (entryTypes[start] === bootstrapType) start++;
+	}
+	return entryTypes.length > start;
+}
+
+/**
+ * Returns whether a persisted session contains only validated creation defaults
+ * and daemon bookkeeping. Parse failures deliberately preserve the file.
+ */
+export async function isDiscardableSessionDraftFile(filePath: string): Promise<boolean> {
+	let sawHeader = false;
+	let previousEntryId: string | null = null;
+	let previousBootstrapIndex = -1;
+	const entryIds = new Set<string>();
+	const contentEntryTypes: string[] = [];
+	try {
+		for await (const lineBuffer of readLinesAsBuffers(filePath)) {
+			if (lineBuffer.length === 0) continue;
+			if (lineBuffer.length > SESSION_LIST_PARSE_MAX_LINE_CHARS) return false;
+			let value: unknown;
+			try {
+				value = JSON.parse(lineBuffer.toString("utf8"));
+			} catch {
+				return false;
+			}
+			if (!sawHeader) {
+				if (!isSessionDraftHeader(value)) return false;
+				sawHeader = true;
+				continue;
+			}
+			if (!isSessionDraftEntry(value) || value.parentId !== previousEntryId || entryIds.has(value.id)) {
+				return false;
+			}
+			const entry = value as SessionDraftEntry & Record<string, unknown>;
+			if (DRAFT_BOOKKEEPING_ENTRY_TYPES.has(entry.type)) {
+				if (!isValidDraftBookkeepingEntry(entry)) return false;
+			} else {
+				const bootstrapIndex = DRAFT_BOOTSTRAP_ENTRY_TYPES.indexOf(
+					entry.type as (typeof DRAFT_BOOTSTRAP_ENTRY_TYPES)[number],
+				);
+				if (bootstrapIndex <= previousBootstrapIndex || !isValidDraftBootstrapEntry(entry)) return false;
+				previousBootstrapIndex = bootstrapIndex;
+				contentEntryTypes.push(entry.type);
+			}
+			entryIds.add(entry.id);
+			previousEntryId = entry.id;
+		}
+	} catch {
+		return false;
+	}
+	return sawHeader && !hasUserContentEntryTypes(contentEntryTypes);
+}
+
 function realpathIfPresent(path: string): string {
 	try {
 		return realpathSync(path);
@@ -1677,18 +1866,10 @@ export class SessionManager {
 	 * prefix is skipped; anything beyond it is user content.
 	 */
 	hasUserContent(): boolean {
-		const contentEntries = this.getEntries().filter((entry) => CONTENT_ENTRY_TYPES.has(entry.type));
-		let start = 0;
-		if (contentEntries[start]?.type === "model_change") {
-			start++;
-		}
-		if (contentEntries[start]?.type === "thinking_level_change") {
-			start++;
-		}
-		if (contentEntries[start]?.type === "service_tier_change") {
-			start++;
-		}
-		return contentEntries.length > start;
+		const contentEntryTypes = this.getEntries()
+			.filter((entry) => CONTENT_ENTRY_TYPES.has(entry.type))
+			.map((entry) => entry.type);
+		return hasUserContentEntryTypes(contentEntryTypes);
 	}
 
 	/** Append the latest agent status (summary + completion judgment). Returns entry id. */

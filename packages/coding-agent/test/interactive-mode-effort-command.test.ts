@@ -58,6 +58,54 @@ type FastInteractiveModePrototype = {
 
 const fastInteractiveModePrototype = InteractiveMode.prototype as unknown as FastInteractiveModePrototype;
 
+type ThinkingCycleContext = {
+	connectionState?: { sessionId: string; thinkingLevel: ThinkingLevel };
+	agentConnection: { cycleThinkingLevel: () => Promise<ThinkingLevel | undefined> };
+	footer: { invalidate: () => void };
+	showStatus: (message: string) => void;
+	showError: (message: string) => void;
+	patchConnectionState: (patch: Record<string, unknown>) => void;
+	updateEditorBorderColor: () => void;
+};
+
+type ModelCycleContext = {
+	connectionState?: {
+		sessionId: string;
+		scopedModels: Array<{ model: Model<Api> }>;
+	};
+	agentConnection: {
+		cycleModel: (
+			direction?: "forward" | "backward",
+		) => Promise<
+			{ model: Model<Api>; thinkingLevel: ThinkingLevel; serviceTier: ServiceTier; isScoped: boolean } | undefined
+		>;
+		getState: () => Promise<{
+			sessionId: string;
+			model?: Model<Api>;
+			thinkingLevel: ThinkingLevel;
+			serviceTier: ServiceTier;
+			availableThinkingLevels: ThinkingLevel[];
+		}>;
+	};
+	settingsManager: { setDefaultModelAndProvider: (provider: string, id: string) => void };
+	footer: { invalidate: () => void };
+	subagentSummaryLine: { invalidate: () => void };
+	showStatus: (message: string) => void;
+	showError: (message: string) => void;
+	patchConnectionState: (patch: Record<string, unknown>) => void;
+	updateEditorBorderColor: () => void;
+	setupAutocompleteProvider: () => void;
+	getScopedModelState: () => Array<{ model: Model<Api> }>;
+	maybeWarnAboutAnthropicSubscriptionAuth: (model: Model<Api>) => Promise<void>;
+};
+
+type CyclingInteractiveModePrototype = {
+	cycleThinkingLevel(this: ThinkingCycleContext): Promise<void>;
+	cycleModel(this: ModelCycleContext, direction: "forward" | "backward"): Promise<void>;
+};
+
+const cyclingInteractiveModePrototype = InteractiveMode.prototype as unknown as CyclingInteractiveModePrototype;
+
 function testModel(provider: string, id: string, api: Api): Model<Api> {
 	return {
 		id,
@@ -414,5 +462,135 @@ describe("InteractiveMode /effort", () => {
 
 			expect(fastInteractiveModePrototype.getModelTrayLabel.call(context)).toBe("gpt-5.5 • high • fast");
 		});
+	});
+});
+
+describe("InteractiveMode keyboard cycling", () => {
+	it("cycles models, refreshes model-dependent state, and reports the selection", async () => {
+		const nextModel = testModel("openai-codex", "gpt-5.6", "openai-codex-responses");
+		const context: ModelCycleContext = {
+			connectionState: { sessionId: "session-1", scopedModels: [] },
+			agentConnection: {
+				cycleModel: vi.fn(async () => ({
+					model: nextModel,
+					thinkingLevel: "high" as ThinkingLevel,
+					serviceTier: "priority" as ServiceTier,
+					isScoped: false,
+				})),
+				getState: vi.fn(async () => ({
+					sessionId: "session-1",
+					model: nextModel,
+					thinkingLevel: "high" as ThinkingLevel,
+					serviceTier: "priority" as ServiceTier,
+					availableThinkingLevels: ["off", "low", "high"] as ThinkingLevel[],
+				})),
+			},
+			settingsManager: { setDefaultModelAndProvider: vi.fn() },
+			footer: { invalidate: vi.fn() },
+			subagentSummaryLine: { invalidate: vi.fn() },
+			showStatus: vi.fn(),
+			showError: vi.fn(),
+			patchConnectionState: vi.fn(),
+			updateEditorBorderColor: vi.fn(),
+			setupAutocompleteProvider: vi.fn(),
+			getScopedModelState: () => [],
+			maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(async () => {}),
+		};
+
+		await cyclingInteractiveModePrototype.cycleModel.call(context, "backward");
+
+		expect(context.agentConnection.cycleModel).toHaveBeenCalledWith("backward");
+		expect(context.settingsManager.setDefaultModelAndProvider).toHaveBeenCalledWith("openai-codex", "gpt-5.6");
+		expect(context.patchConnectionState).toHaveBeenCalledWith({
+			model: nextModel,
+			thinkingLevel: "high",
+			serviceTier: "priority",
+			availableThinkingLevels: ["off", "low", "high"],
+		});
+		expect(context.footer.invalidate).toHaveBeenCalledOnce();
+		expect(context.subagentSummaryLine.invalidate).toHaveBeenCalledOnce();
+		expect(context.updateEditorBorderColor).toHaveBeenCalledOnce();
+		expect(context.setupAutocompleteProvider).toHaveBeenCalledOnce();
+		expect(context.showStatus).toHaveBeenCalledWith("Switched to gpt-5.6 (thinking: high)");
+		expect(context.maybeWarnAboutAnthropicSubscriptionAuth).toHaveBeenCalledWith(nextModel);
+	});
+
+	it("reports when model cycling has no alternative", async () => {
+		const currentModel = testModel("openai-codex", "gpt-5.5", "openai-codex-responses");
+		const context: ModelCycleContext = {
+			connectionState: { sessionId: "session-1", scopedModels: [{ model: currentModel }] },
+			agentConnection: {
+				cycleModel: vi.fn(async () => undefined),
+				getState: vi.fn(async () => {
+					throw new Error("getState should not be called");
+				}),
+			},
+			settingsManager: { setDefaultModelAndProvider: vi.fn() },
+			footer: { invalidate: vi.fn() },
+			subagentSummaryLine: { invalidate: vi.fn() },
+			showStatus: vi.fn(),
+			showError: vi.fn(),
+			patchConnectionState: vi.fn(),
+			updateEditorBorderColor: vi.fn(),
+			setupAutocompleteProvider: vi.fn(),
+			getScopedModelState: () => [{ model: currentModel }],
+			maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(async () => {}),
+		};
+
+		await cyclingInteractiveModePrototype.cycleModel.call(context, "forward");
+
+		expect(context.agentConnection.getState).not.toHaveBeenCalled();
+		expect(context.showStatus).toHaveBeenCalledWith("Only one model in scope");
+	});
+
+	it("cycles thinking level and updates the editor state", async () => {
+		const context: ThinkingCycleContext = {
+			connectionState: { sessionId: "session-1", thinkingLevel: "medium" },
+			agentConnection: { cycleThinkingLevel: vi.fn(async (): Promise<ThinkingLevel> => "high") },
+			footer: { invalidate: vi.fn() },
+			showStatus: vi.fn(),
+			showError: vi.fn(),
+			patchConnectionState: vi.fn(),
+			updateEditorBorderColor: vi.fn(),
+		};
+
+		await cyclingInteractiveModePrototype.cycleThinkingLevel.call(context);
+
+		expect(context.patchConnectionState).toHaveBeenCalledWith({ thinkingLevel: "high" });
+		expect(context.footer.invalidate).toHaveBeenCalledOnce();
+		expect(context.updateEditorBorderColor).toHaveBeenCalledOnce();
+		expect(context.showStatus).toHaveBeenCalledWith("Thinking level: high");
+	});
+
+	it("reports unsupported thinking cycling and connection errors", async () => {
+		const unsupportedContext: ThinkingCycleContext = {
+			connectionState: { sessionId: "session-1", thinkingLevel: "off" },
+			agentConnection: { cycleThinkingLevel: vi.fn(async () => undefined) },
+			footer: { invalidate: vi.fn() },
+			showStatus: vi.fn(),
+			showError: vi.fn(),
+			patchConnectionState: vi.fn(),
+			updateEditorBorderColor: vi.fn(),
+		};
+
+		await cyclingInteractiveModePrototype.cycleThinkingLevel.call(unsupportedContext);
+
+		expect(unsupportedContext.showStatus).toHaveBeenCalledWith("Current model does not support thinking");
+		expect(unsupportedContext.patchConnectionState).not.toHaveBeenCalled();
+
+		const errorContext: ThinkingCycleContext = {
+			...unsupportedContext,
+			agentConnection: {
+				cycleThinkingLevel: vi.fn(async () => {
+					throw new Error("nope");
+				}),
+			},
+			showStatus: vi.fn(),
+			showError: vi.fn(),
+		};
+
+		await cyclingInteractiveModePrototype.cycleThinkingLevel.call(errorContext);
+
+		expect(errorContext.showError).toHaveBeenCalledWith("nope");
 	});
 });

@@ -64,6 +64,9 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 	"app.clear",
 	"app.exit",
 	"app.suspend",
+	"app.thinking.cycle",
+	"app.model.cycleForward",
+	"app.model.cycleBackward",
 	"app.model.select",
 	"app.tools.expand",
 	"app.thinking.toggle",
@@ -77,6 +80,18 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 	"tui.editor.deleteToLineEnd",
 ] as const;
 
+const SHORTCUT_MODIFIERS = ["ctrl", "shift", "alt", "super"] as const;
+
+function normalizeShortcutKey(key: KeyId): KeyId {
+	const parts = key.toLowerCase().split("+");
+	const keyName = parts.pop();
+	if (!keyName) {
+		return key.toLowerCase() as KeyId;
+	}
+	const modifiers = SHORTCUT_MODIFIERS.filter((modifier) => parts.includes(modifier));
+	return [...modifiers, keyName].join("+") as KeyId;
+}
+
 type BuiltInKeyBindings = Partial<Record<KeyId, { keybinding: string; restrictOverride: boolean }>>;
 
 const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltInKeyBindings => {
@@ -86,7 +101,7 @@ const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltI
 		const keyList = Array.isArray(keys) ? keys : [keys];
 		const restrictOverride = (RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS as readonly string[]).includes(keybinding);
 		for (const key of keyList) {
-			const normalizedKey = key.toLowerCase() as KeyId;
+			const normalizedKey = normalizeShortcutKey(key);
 			// If multiple actions bind the same key, the reserved action wins so extensions
 			// remain blocked by reserved shortcuts regardless of iteration order.
 			const existing = builtinKeybindings[normalizedKey];
@@ -426,7 +441,7 @@ export class ExtensionRunner {
 
 		for (const ext of this.extensions) {
 			for (const [key, shortcut] of ext.shortcuts) {
-				const normalizedKey = key.toLowerCase() as KeyId;
+				const normalizedKey = normalizeShortcutKey(key);
 
 				const builtInKeybinding = builtinKeybindings[normalizedKey];
 				if (builtInKeybinding?.restrictOverride === true) {
