@@ -11,7 +11,7 @@
  * compiled Bun binary), keyed off the __PI_BUNDLED__ define below, so extension
  * imports of pi packages share the bundle's module instances.
  */
-import { chmodSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,4 +49,18 @@ await build({
 });
 
 chmodSync(join(outdir, "cli.js"), 0o755);
+
+// Node-only providers use lazy imports. Ensure the bundle did not leave the
+// source-relative Bedrock path behind, which would resolve to
+// dist/bundle/amazon-bedrock.js at runtime even though the provider is loaded
+// from the installed AI package.
+const unresolvedBedrockImports = readdirSync(outdir)
+	.filter((file) => file.endsWith(".js"))
+	.filter((file) => readFileSync(join(outdir, file), "utf8").includes('import("./amazon-bedrock.js")'));
+if (unresolvedBedrockImports.length > 0) {
+	throw new Error(
+		`Bundle contains unresolved Bedrock imports in: ${unresolvedBedrockImports.join(", ")}.`,
+	);
+}
+
 console.log("bundled dist/cli.js -> dist/bundle/");

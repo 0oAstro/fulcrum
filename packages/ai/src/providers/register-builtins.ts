@@ -86,7 +86,22 @@ interface BedrockProviderModule {
 	) => AsyncIterable<AssistantMessageEvent>;
 }
 
-const importNodeOnlyProvider = (specifier: string): Promise<unknown> => import(specifier);
+declare const __PI_BUNDLED__: boolean | undefined;
+
+const bundledBedrockProviderSpecifier = ["@earendil-works/pi-ai", "bedrock-provider"].join("/");
+
+const importNodeOnlyProvider = (specifier: string): Promise<unknown> => {
+	// The bundled CLI moves this file into dist/bundle/, so a source-relative
+	// Node-only import would incorrectly resolve to dist/bundle/amazon-bedrock.js.
+	// Resolve the provider through the installed AI package in that build. Keep
+	// this non-literal so browser builds do not traverse Node-only AWS modules.
+	if (typeof __PI_BUNDLED__ !== "undefined" && __PI_BUNDLED__ && specifier === "./amazon-bedrock.js") {
+		return import(bundledBedrockProviderSpecifier).then(
+			(module) => (module as { bedrockProviderModule: BedrockProviderModule }).bedrockProviderModule,
+		);
+	}
+	return import(specifier);
+};
 
 let anthropicProviderModulePromise:
 	| Promise<LazyProviderModule<"anthropic-messages", AnthropicOptions, SimpleStreamOptions>>
