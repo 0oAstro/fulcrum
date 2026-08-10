@@ -19,6 +19,9 @@
 - Added a background personal-WhatsApp gateway with per-chat sessions, media transfer, latest-message interruption, and configurable conversation rotation.
 - Added first-party pre-imported `websearch` and `browser` Python modules backed by host-side Firecrawl service credentials.
 - Changed the application name, command, runtime package, and default configuration directory to Fulcrum, `fulcrum`, `fulcrum-runtime`, and `~/.fulcrum`.
+- Added `app.messages.expand` (`ctrl+p`) to collapse or expand agent-to-agent messages separately from `ctrl+o` tool output.
+- Added a `ctrl+t` expand hint to collapsed thinking blocks, matching the tool output hint.
+- Changed expand/collapse hints to a consistent bracketed `(Ctrl+O to expand)` style across tool, message, summary, and error rows.
 - Added a configurable copy action to login dialogs so raw sign-in URLs can be copied without selecting wrapped text ([#643](https://github.com/PrimeIntellect-ai/prime-agent/issues/643)).
 - Changed sent agent messages in the IPython cell UI to show only the message text with a `╰─` gutter when expanded, matching received messages, and hid the raw `agent_message.send` receipt dictionary.
 - Removed Prime Inference, Prime Intellect skills, agent trace uploads, and product telemetry.
