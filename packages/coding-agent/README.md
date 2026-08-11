@@ -23,6 +23,7 @@ Fulcrum began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mono), 
 - [Customization](#customization)
   - [Prompt Templates](#prompt-templates)
   - [Skills](#skills)
+  - [Optional ByteRover Memory](#optional-byterover-memory)
   - [MCP Integrations](#mcp-integrations)
   - [Extensions](#extensions)
   - [Themes](#themes)
@@ -301,6 +302,16 @@ Skills can also be Python-backed. A Python skill is a normal skill directory wit
 Place in `~/.fulcrum/skills/` or `.fulcrum/skills/`, or use a [Fulcrum package](#fulcrum-packages) to share with others. See [docs/skills.md](docs/skills.md).
 
 Fulcrum pre-imports first-party `websearch` and `browser` Python modules backed by its host-side Firecrawl service. Run `/login`, switch to **MCP Connections**, and choose "Firecrawl (web search and browser)" to add your key. These modules are available independently of skill discovery.
+
+### Optional ByteRover Memory
+
+[ByteRover V4](https://docs.byterover.dev/v4/overview) can provide project and team memory through its official Agent Skill. It is not bundled or enabled by default. Review the third-party skill repository, then install it only when you want it:
+
+```bash
+fulcrum package install git:github.com/campfirein/skills
+```
+
+After restarting Fulcrum, the enabled skill is exposed as a pre-imported `byterover` Python module with `query()`, `read()`, and `record()` methods backed by ByteRover's official V4 scripts. Set `byterover.dataDir` to use an initialized local V4 data root; on Linux, `byterover.offline: true` runs those scripts without network access through Bubblewrap. The local integration does not expose ByteRover authentication helpers. ByteRover remains separate from Fulcrum's continual harness and fails open when unavailable. See [docs/byterover.md](docs/byterover.md) for local-runtime limits, setup, API examples, privacy boundaries, project-local installation, and removal.
 
 ### MCP Integrations
 

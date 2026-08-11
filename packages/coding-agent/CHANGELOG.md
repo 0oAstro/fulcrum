@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added optional ByteRover V4 project memory with a pre-imported Python facade, configurable local data storage, and network-isolated Linux operation.
+- Changed default responses to be more direct, natural, and context-sensitive while preserving requested formats and project instructions.
 - Fixed Amazon Bedrock model discovery and switching when credentials come from shared AWS profiles.
 - Fixed bookkeeping-only daemon drafts remaining after their last client disconnects or crash recovery.
 - Added Ctrl+P and Ctrl+Shift+P model cycling plus Shift+Tab reasoning-level cycling.

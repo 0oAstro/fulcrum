@@ -72,6 +72,11 @@ export interface WebsearchSettings {
 	researchModel?: string; // exact model ID or provider/model reference used for planning and synthesis
 }
 
+export interface ByteRoverSettings {
+	dataDir?: string; // Local V4 data directory passed to the official runtime as BRV_DATA_DIR
+	offline?: boolean; // Run the V4 scripts without network access; currently requires bubblewrap on Linux
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -161,6 +166,7 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	websearch?: WebsearchSettings;
+	byterover?: ByteRoverSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 }
 
@@ -1137,6 +1143,14 @@ export class SettingsManager {
 
 	getWebsearchResearchModel(): string | undefined {
 		return this.settings.websearch?.researchModel?.trim() || undefined;
+	}
+
+	getByteRoverDataDir(): string | undefined {
+		return this.settings.byterover?.dataDir?.trim() || undefined;
+	}
+
+	getByteRoverOffline(): boolean {
+		return this.settings.byterover?.offline ?? false;
 	}
 
 	getMcpServers(): Record<string, McpServerConfig> | undefined {

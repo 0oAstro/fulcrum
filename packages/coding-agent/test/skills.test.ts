@@ -69,6 +69,26 @@ version = "0.1.0"
 	writeFileSync(join(skillDir, "src", importName, "__init__.py"), "async def run():\n    return 'ok'\n");
 }
 
+function writeByteRoverSkill(root: string): string {
+	const skillDir = join(root, "byterover");
+	const scriptsDir = join(skillDir, "scripts");
+	mkdirSync(scriptsDir, { recursive: true });
+	writeFileSync(
+		join(skillDir, "SKILL.md"),
+		`---
+name: byterover
+description: Retrieve and record durable project memory.
+---
+
+Use ByteRover for project memory.
+`,
+	);
+	for (const script of ["query.mjs", "record.mjs", "brv.mjs", "space.mjs", "sync.mjs"]) {
+		writeFileSync(join(scriptsDir, script), "");
+	}
+	return skillDir;
+}
+
 describe("skills", () => {
 	describe("loadSkillsFromDir", () => {
 		it("should load a valid skill", () => {
@@ -289,6 +309,42 @@ describe("skills", () => {
 				},
 			]);
 			expect(diagnostics).toHaveLength(0);
+		});
+
+		it("should attach the Python facade when the ByteRover V4 skill is enabled", () => {
+			const tempDir = mkdtempSync(join(tmpdir(), "fulcrum-byterover-skill-"));
+			try {
+				const skillDir = writeByteRoverSkill(tempDir);
+				const { skills, diagnostics } = loadSkillsFromDir({ dir: skillDir, source: "test" });
+
+				expect(skills).toHaveLength(1);
+				expect(skills[0].kind).toBe("markdown");
+				expect(getPythonSkillRuntimeInfo(skills)).toMatchObject([
+					{
+						name: "byterover",
+						importName: "byterover",
+					},
+				]);
+				const prompt = formatSkillsForPrompt(skills);
+				expect(prompt).toContain("<type>python</type>");
+				expect(prompt).toContain("<python_import>byterover</python_import>");
+				expect(diagnostics).toHaveLength(0);
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		});
+
+		it("should not attach the ByteRover facade without the full V4 runtime", () => {
+			const tempDir = mkdtempSync(join(tmpdir(), "fulcrum-partial-byterover-skill-"));
+			try {
+				const skillDir = writeByteRoverSkill(tempDir);
+				rmSync(join(skillDir, "scripts", "space.mjs"));
+				const { skills } = loadSkillsFromDir({ dir: skillDir, source: "test" });
+
+				expect(getPythonSkillRuntimeInfo(skills)).toEqual([]);
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
 		});
 
 		it("should warn and keep metadata-only skills when Python package files are missing", () => {

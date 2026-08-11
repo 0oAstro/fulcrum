@@ -16,7 +16,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
 	Agent,
@@ -255,7 +255,7 @@ import {
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
-import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
+import { findEnabledByteRoverSkill, getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 import {
 	parseRefineCommandOptions,
 	parseSessionSlashCommand,
@@ -8555,7 +8555,8 @@ export class AgentSession {
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
 	}): void {
-		const pythonSkills = getPythonSkillRuntimeInfo(this._modelVisibleSkills());
+		const visibleSkills = this._modelVisibleSkills();
+		const pythonSkills = getPythonSkillRuntimeInfo(visibleSkills);
 		let configuredBaseToolDefinitions: Record<string, ToolDefinition>;
 		if (this._baseToolsOverride) {
 			configuredBaseToolDefinitions = Object.fromEntries(
@@ -8576,7 +8577,7 @@ export class AgentSession {
 			// for continuity — the conversation is unchanged, so there's nothing to flag.
 			const notifyRestore = !this._ipythonRuntimeBuilt;
 			this._ipythonKernelProvisioner = new IpythonKernelProvisioner(this._cwd, {
-				env: this._rlmKernelEnv(),
+				env: this._rlmKernelEnv(visibleSkills),
 				sessionId: this.sessionId,
 				hostHandlers: this._createKernelHostHandlers(),
 				pythonSkills,
@@ -8832,7 +8833,7 @@ export class AgentSession {
 		}
 	}
 
-	private _rlmKernelEnv(): Record<string, string> {
+	private _rlmKernelEnv(visibleSkills: readonly Skill[]): Record<string, string> {
 		// Kernel env is provisioning-time only: RLM_MAX_DEPTH may be stale in an already-running kernel;
 		// the TypeScript-side spawn check remains authoritative.
 		const env: Record<string, string> = {
@@ -8850,6 +8851,21 @@ export class AgentSession {
 		}
 		if (this._agentDir) {
 			env.FULCRUM_CODING_AGENT_DIR = this._agentDir;
+		}
+		const byteRoverSkill = findEnabledByteRoverSkill(visibleSkills);
+		env.BYTEROVER_SKILL_DIR = byteRoverSkill?.baseDir ?? "";
+		const byteRoverDataDir = this.settingsManager.getByteRoverDataDir();
+		if (byteRoverSkill && byteRoverDataDir) {
+			const expandedDataDir =
+				byteRoverDataDir === "~"
+					? homedir()
+					: byteRoverDataDir.startsWith("~/") || byteRoverDataDir.startsWith("~\\")
+						? join(homedir(), byteRoverDataDir.slice(2))
+						: byteRoverDataDir;
+			env.BRV_DATA_DIR = resolve(this._agentDir ?? process.cwd(), expandedDataDir);
+		}
+		if (byteRoverSkill && this.settingsManager.getByteRoverOffline()) {
+			env.FULCRUM_BYTEROVER_OFFLINE = "1";
 		}
 		return env;
 	}

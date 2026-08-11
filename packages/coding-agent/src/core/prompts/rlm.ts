@@ -1,4 +1,5 @@
 import { DEFAULT_RLM_EXTRA_IMPORT_LABELS } from "../kernel/bootstrap.js";
+import { buildConversationStylePrompt } from "./conversation-style.js";
 
 export interface RlmPromptOptions {
 	cwd: string;
@@ -71,6 +72,8 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		"You are a general purpose agent that uses code to solve tasks.",
 		"You solve tasks by breaking down problems into sub-tasks, writing and executing code, observing results, and iterating one step at a time.",
 		"When you are done, stop calling tools and state your final answer.",
+		"",
+		buildConversationStylePrompt(),
 		"",
 		`Working directory: ${cwd}`,
 		`Conversation log: ${messagesPath}`,

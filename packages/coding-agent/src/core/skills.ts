@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import ignore from "ignore";
 import { homedir } from "os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
-import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { CONFIG_DIR_NAME, getAgentDir, getBundledSkillsDir } from "../config.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import { canonicalizePath } from "../utils/paths.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
@@ -108,6 +108,37 @@ export type Skill = MarkdownSkill | PythonSkill;
 
 export interface PythonSkillRuntimeInfo extends SkillPythonMetadata {
 	name: string;
+}
+
+export const BYTEROVER_SKILL_NAME = "byterover";
+const BYTEROVER_RUNTIME_SCRIPTS = ["query.mjs", "record.mjs", "brv.mjs", "space.mjs", "sync.mjs"] as const;
+
+export function findEnabledByteRoverSkill(skills: readonly Skill[]): Skill | undefined {
+	return skills.find((skill) => {
+		if (skill.name !== BYTEROVER_SKILL_NAME) return false;
+		return BYTEROVER_RUNTIME_SCRIPTS.every((script) => {
+			try {
+				return statSync(join(skill.baseDir, "scripts", script)).isFile();
+			} catch {
+				return false;
+			}
+		});
+	});
+}
+
+function getByteRoverPythonRuntimeInfo(skills: readonly Skill[]): PythonSkillRuntimeInfo | undefined {
+	const skill = findEnabledByteRoverSkill(skills);
+	if (!skill || skill.kind === "python") return undefined;
+	const packagePath = join(getBundledSkillsDir(), "_runtime", BYTEROVER_SKILL_NAME);
+	const pyprojectPath = join(packagePath, "pyproject.toml");
+	const packageInitPath = join(packagePath, "src", BYTEROVER_SKILL_NAME, "__init__.py");
+	if (!existsSync(pyprojectPath) || !existsSync(packageInitPath)) return undefined;
+	return {
+		name: BYTEROVER_SKILL_NAME,
+		importName: BYTEROVER_SKILL_NAME,
+		packagePath,
+		pyprojectPath,
+	};
 }
 
 export interface LoadSkillsResult {
@@ -254,7 +285,7 @@ function detectPythonSkill(
 }
 
 export function getPythonSkillRuntimeInfo(skills: readonly Skill[]): PythonSkillRuntimeInfo[] {
-	return skills
+	const runtimeInfo = skills
 		.filter((skill): skill is PythonSkill => skill.kind === "python")
 		.map((skill) => ({
 			name: skill.name,
@@ -262,6 +293,11 @@ export function getPythonSkillRuntimeInfo(skills: readonly Skill[]): PythonSkill
 			packagePath: skill.python.packagePath,
 			pyprojectPath: skill.python.pyprojectPath,
 		}));
+	const byteRoverRuntime = getByteRoverPythonRuntimeInfo(skills);
+	if (byteRoverRuntime && !runtimeInfo.some((skill) => skill.importName === byteRoverRuntime.importName)) {
+		runtimeInfo.push(byteRoverRuntime);
+	}
+	return runtimeInfo;
 }
 
 /**
@@ -454,6 +490,7 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 		return "";
 	}
 
+	const pythonRuntimeByName = new Map(getPythonSkillRuntimeInfo(visibleSkills).map((skill) => [skill.name, skill]));
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
 		"Use the exact location listed for a skill when its instructions must be inspected; never infer or rewrite its path from the skill name.",
@@ -464,11 +501,12 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 	];
 
 	for (const skill of visibleSkills) {
+		const pythonRuntime = pythonRuntimeByName.get(skill.name);
 		lines.push("  <skill>");
 		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-		lines.push(`    <type>${skill.kind}</type>`);
-		if (skill.kind === "python") {
-			lines.push(`    <python_import>${escapeXml(skill.python.importName)}</python_import>`);
+		lines.push(`    <type>${pythonRuntime ? "python" : skill.kind}</type>`);
+		if (pythonRuntime) {
+			lines.push(`    <python_import>${escapeXml(pythonRuntime.importName)}</python_import>`);
 		}
 		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
 		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);

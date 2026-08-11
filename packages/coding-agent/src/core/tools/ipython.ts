@@ -30,6 +30,10 @@ import types as _fulcrum_types
 _fulcrum_os.environ["NO_COLOR"] = "1"
 get_ipython().colors = "nocolor"
 
+if not _fulcrum_os.environ.get("BYTEROVER_SKILL_DIR"):
+    globals().pop("byterover", None)
+    _fulcrum_sys.modules.pop("byterover", None)
+
 try:
     import nest_asyncio as _fulcrum_nest_asyncio
     _fulcrum_nest_asyncio.apply()
