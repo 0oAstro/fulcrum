@@ -5,6 +5,9 @@
 - Fixed Amazon Bedrock availability hints and endpoint resolution for shared AWS profiles and runtime endpoint overrides.
 - Removed the Prime Inference provider and its private model catalog integration.
 
+
+## [0.7.2] - 2026-08-11
+
 ## [0.7.1] - 2026-08-07
 
 ## [0.7.0] - 2026-08-05
